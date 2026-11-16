@@ -1,0 +1,26 @@
+# Dependências Node.js
+node_modules/
+npm-debug.log*
+coverage/
+
+# Arquivos de ambiente e segredos locais
+.env
+.env.*
+*.pem
+*.key
+
+# Terraform e estado de infraestrutura
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+*.tfvars.json
+!infra/terraform/environments/*.tfvars
+
+# Arquivos temporários e de sistema operacional
+.DS_Store
+Thumbs.db
+*.log
+tmp/
+dist/
