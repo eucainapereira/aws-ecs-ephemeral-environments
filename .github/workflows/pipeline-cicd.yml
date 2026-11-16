@@ -1,0 +1,356 @@
+name: Pipeline Multi-Ambiente ECS & ECR (Dev, Staging Efêmeros e Prod Permanente)
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+    inputs:
+      deploy_prod:
+        description: "Confirmar promoção para o ambiente permanente de produção (se aplicável)"
+        required: false
+        default: "false"
+        type: string
+
+permissions:
+  id-token: write # Necessário para autenticação OIDC na AWS (sem chaves estáticas)
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  PROJECT_NAME: portfolio-app
+  ECR_REPOSITORY: app
+
+jobs:
+  # ===========================================================================
+  # JOB 1: Build da Imagem + Push Imutável para o Amazon ECR
+  # ===========================================================================
+  build-and-push-ecr:
+    name: "1. Build e Push Imutável no ECR"
+    runs-on: ubuntu-latest
+    outputs:
+      image_uri: ${{ steps.build-info.outputs.image_uri }}
+      image_tag: ${{ steps.build-info.outputs.image_tag }}
+      short_sha: ${{ steps.build-info.outputs.short_sha }}
+
+    steps:
+      - name: Checkout do código-fonte
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js 20 e executar testes unitários
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Rodar testes unitários da aplicação
+        working-directory: app
+        run: npm test
+
+      - name: Assumir Identidade do Pipeline (CI/CD) via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CICD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login no Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Gerar tag imutável e construir imagem Docker
+        id: build-info
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          IMAGE_TAG="dev-${SHORT_SHA}"
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          echo "Gerando artefato imutável: ${IMAGE_URI}"
+          docker build \
+            --build-arg IMAGE_TAG="${IMAGE_TAG}" \
+            --build-arg GIT_SHA="${SHORT_SHA}" \
+            -t "${IMAGE_URI}" \
+            ./app
+
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "image_uri=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
+
+      - name: Enviar imagem com tag única e imutável para o Amazon ECR
+        env:
+          IMAGE_URI: ${{ steps.build-info.outputs.image_uri }}
+        run: |
+          docker push "${IMAGE_URI}"
+          echo "Imagem publicada com sucesso no ECR: ${IMAGE_URI}"
+
+  # ===========================================================================
+  # JOB 2: Ambiente Efêmero de DEV (Sobe Service/Task -> Testa -> Encerra)
+  # ===========================================================================
+  ephemeral-dev:
+    name: "2. Ambiente Efêmero DEV (Deploy, Testes e Teardown)"
+    needs: [build-and-push-ecr]
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - name: Checkout do código-fonte
+        uses: actions/checkout@v4
+
+      - name: Assumir Identidade do Pipeline (CI/CD) via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CICD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Registrar nova revisão da Task Definition (DEV) apontando para a tag imutável
+        id: register-td
+        env:
+          IMAGE_URI: ${{ needs.build-and-push-ecr.outputs.image_uri }}
+          IMAGE_TAG: ${{ needs.build-and-push-ecr.outputs.image_tag }}
+          SHORT_SHA: ${{ needs.build-and-push-ecr.outputs.short_sha }}
+        run: |
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+          sed -e "s|__AWS_ACCOUNT_ID__|${AWS_ACCOUNT_ID}|g" \
+              -e "s|__AWS_REGION__|${AWS_REGION}|g" \
+              -e "s|__ECR_IMAGE_URI__|${IMAGE_URI}|g" \
+              -e "s|__IMAGE_TAG__|${IMAGE_TAG}|g" \
+              -e "s|__GIT_SHA__|${SHORT_SHA}|g" \
+              ecs/task-definition.dev.json > /tmp/td-dev.json
+
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file:///tmp/td-dev.json \
+            --query "taskDefinition.taskDefinitionArn" \
+            --output text)
+
+          echo "Task Definition registrada: ${TASK_DEF_ARN}"
+          echo "task_def_arn=${TASK_DEF_ARN}" >> "$GITHUB_OUTPUT"
+
+      - name: Subir Service/Task efêmero no Amazon ECS (DEV)
+        env:
+          TASK_DEF_ARN: ${{ steps.register-td.outputs.task_def_arn }}
+        run: |
+          # O ECS Agent usará a ecsTaskExecutionRole para puxar a imagem do ECR
+          # e enviar stdout/stderr do container para /ecs/portfolio-app/dev.
+          # O código da aplicação usará a ecsTaskRole em tempo de execução.
+          aws ecs update-service \
+            --cluster "${PROJECT_NAME}-dev-cluster" \
+            --service "${PROJECT_NAME}-dev-service" \
+            --task-definition "${TASK_DEF_ARN}" \
+            --desired-count 1 \
+            --force-new-deployment
+
+          aws ecs wait services-stable \
+            --cluster "${PROJECT_NAME}-dev-cluster" \
+            --services "${PROJECT_NAME}-dev-service"
+
+      - name: Executar testes funcionais no ambiente efêmero DEV e validar CloudWatch Logs
+        run: |
+          TASK_ARN=$(aws ecs list-tasks \
+            --cluster "${PROJECT_NAME}-dev-cluster" \
+            --service-name "${PROJECT_NAME}-dev-service" \
+            --desired-status RUNNING \
+            --query "taskArns[0]" \
+            --output text)
+
+          ENI_ID=$(aws ecs describe-tasks \
+            --cluster "${PROJECT_NAME}-dev-cluster" \
+            --tasks "${TASK_ARN}" \
+            --query "tasks[0].attachments[0].details[?name=='networkInterfaceId'].value | [0]" \
+            --output text)
+
+          PUBLIC_IP=$(aws ec2 describe-network-interfaces \
+            --network-interface-ids "${ENI_ID}" \
+            --query "NetworkInterfaces[0].Association.PublicIp" \
+            --output text)
+
+          echo "Executando smoke tests em http://${PUBLIC_IP}:3000"
+          curl --fail --silent --show-error "http://${PUBLIC_IP}:3000/health"
+          curl --fail --silent --show-error "http://${PUBLIC_IP}:3000/info"
+
+          # Valida persistência de logs enviados pela ecsTaskExecutionRole ao CloudWatch
+          sleep 10
+          aws logs filter-log-events \
+            --log-group-name "/ecs/${PROJECT_NAME}/dev" \
+            --limit 10 \
+            --query "events[*].message"
+
+      - name: "Teardown DEV: encerrar Service/Task preservando imagem no ECR e logs no CloudWatch"
+        if: always()
+        run: |
+          echo "Encerrando tasks do ambiente efêmero DEV (desired-count = 0)..."
+          aws ecs update-service \
+            --cluster "${PROJECT_NAME}-dev-cluster" \
+            --service "${PROJECT_NAME}-dev-service" \
+            --desired-count 0
+
+          aws ecs wait services-stable \
+            --cluster "${PROJECT_NAME}-dev-cluster" \
+            --services "${PROJECT_NAME}-dev-service"
+
+          echo "Service/Task de DEV encerrado. Imagem no ECR e logs no CloudWatch permanecem intactos."
+
+  # ===========================================================================
+  # JOB 3: Ambiente Efêmero de STAGING (Mesma Tag Imutável -> Testa -> Encerra)
+  # ===========================================================================
+  ephemeral-staging:
+    name: "3. Ambiente Efêmero STAGING (Mesma Imagem, Testes e Teardown)"
+    needs: [build-and-push-ecr, ephemeral-dev]
+    runs-on: ubuntu-latest
+    environment: staging
+
+    steps:
+      - name: Checkout do código-fonte
+        uses: actions/checkout@v4
+
+      - name: Assumir Identidade do Pipeline (CI/CD) via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CICD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Registrar revisão da Task Definition (STAGING) reutilizando a mesma imagem do ECR
+        id: register-td
+        env:
+          IMAGE_URI: ${{ needs.build-and-push-ecr.outputs.image_uri }}
+          IMAGE_TAG: ${{ needs.build-and-push-ecr.outputs.image_tag }}
+          SHORT_SHA: ${{ needs.build-and-push-ecr.outputs.short_sha }}
+        run: |
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+          sed -e "s|__AWS_ACCOUNT_ID__|${AWS_ACCOUNT_ID}|g" \
+              -e "s|__AWS_REGION__|${AWS_REGION}|g" \
+              -e "s|__ECR_IMAGE_URI__|${IMAGE_URI}|g" \
+              -e "s|__IMAGE_TAG__|${IMAGE_TAG}|g" \
+              -e "s|__GIT_SHA__|${SHORT_SHA}|g" \
+              ecs/task-definition.staging.json > /tmp/td-staging.json
+
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file:///tmp/td-staging.json \
+            --query "taskDefinition.taskDefinitionArn" \
+            --output text)
+
+          echo "task_def_arn=${TASK_DEF_ARN}" >> "$GITHUB_OUTPUT"
+
+      - name: Subir Service/Task efêmero no Amazon ECS (STAGING)
+        env:
+          TASK_DEF_ARN: ${{ steps.register-td.outputs.task_def_arn }}
+        run: |
+          aws ecs update-service \
+            --cluster "${PROJECT_NAME}-staging-cluster" \
+            --service "${PROJECT_NAME}-staging-service" \
+            --task-definition "${TASK_DEF_ARN}" \
+            --desired-count 1 \
+            --force-new-deployment
+
+          aws ecs wait services-stable \
+            --cluster "${PROJECT_NAME}-staging-cluster" \
+            --services "${PROJECT_NAME}-staging-service"
+
+      - name: Executar testes de integração/homologação no ambiente STAGING
+        run: |
+          TASK_ARN=$(aws ecs list-tasks \
+            --cluster "${PROJECT_NAME}-staging-cluster" \
+            --service-name "${PROJECT_NAME}-staging-service" \
+            --desired-status RUNNING \
+            --query "taskArns[0]" \
+            --output text)
+
+          ENI_ID=$(aws ecs describe-tasks \
+            --cluster "${PROJECT_NAME}-staging-cluster" \
+            --tasks "${TASK_ARN}" \
+            --query "tasks[0].attachments[0].details[?name=='networkInterfaceId'].value | [0]" \
+            --output text)
+
+          PUBLIC_IP=$(aws ec2 describe-network-interfaces \
+            --network-interface-ids "${ENI_ID}" \
+            --query "NetworkInterfaces[0].Association.PublicIp" \
+            --output text)
+
+          echo "Validando ambiente efêmero STAGING em http://${PUBLIC_IP}:3000"
+          curl --fail --silent --show-error "http://${PUBLIC_IP}:3000/health"
+          curl --fail --silent --show-error "http://${PUBLIC_IP}:3000/info"
+
+          sleep 10
+          aws logs filter-log-events \
+            --log-group-name "/ecs/${PROJECT_NAME}/staging" \
+            --limit 10 \
+            --query "events[*].message"
+
+      - name: "Teardown STAGING: encerrar Service/Task preservando imagem no ECR e logs no CloudWatch"
+        if: always()
+        run: |
+          echo "Encerrando tasks do ambiente efêmero STAGING (desired-count = 0)..."
+          aws ecs update-service \
+            --cluster "${PROJECT_NAME}-staging-cluster" \
+            --service "${PROJECT_NAME}-staging-service" \
+            --desired-count 0
+
+          aws ecs wait services-stable \
+            --cluster "${PROJECT_NAME}-staging-cluster" \
+            --services "${PROJECT_NAME}-staging-service"
+
+          echo "Service/Task de STAGING encerrado. Logs preservados em /ecs/${PROJECT_NAME}/staging."
+
+  # ===========================================================================
+  # JOB 4: Promoção da Mesma Tag Imutável para o Service Permanente de PRODUÇÃO
+  # ===========================================================================
+  promote-prod:
+    name: "4. Promoção Imutável para PRODUÇÃO (Service Permanente)"
+    needs: [build-and-push-ecr, ephemeral-staging]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production # Exige aprovação manual configurada no GitHub Environments
+
+    steps:
+      - name: Checkout do código-fonte
+        uses: actions/checkout@v4
+
+      - name: Assumir Identidade do Pipeline (CI/CD) via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CICD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Registrar Task Definition (PROD) promovendo a exata mesma imagem testada
+        id: register-td
+        env:
+          IMAGE_URI: ${{ needs.build-and-push-ecr.outputs.image_uri }}
+          IMAGE_TAG: ${{ needs.build-and-push-ecr.outputs.image_tag }}
+          SHORT_SHA: ${{ needs.build-and-push-ecr.outputs.short_sha }}
+        run: |
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+          sed -e "s|__AWS_ACCOUNT_ID__|${AWS_ACCOUNT_ID}|g" \
+              -e "s|__AWS_REGION__|${AWS_REGION}|g" \
+              -e "s|__ECR_IMAGE_URI__|${IMAGE_URI}|g" \
+              -e "s|__IMAGE_TAG__|${IMAGE_TAG}|g" \
+              -e "s|__GIT_SHA__|${SHORT_SHA}|g" \
+              ecs/task-definition.prod.json > /tmp/td-prod.json
+
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file:///tmp/td-prod.json \
+            --query "taskDefinition.taskDefinitionArn" \
+            --output text)
+
+          echo "Nova revisão registrada para PROD: ${TASK_DEF_ARN}"
+          echo "task_def_arn=${TASK_DEF_ARN}" >> "$GITHUB_OUTPUT"
+
+      - name: Atualizar Service permanente de PRODUÇÃO com zero-downtime
+        env:
+          TASK_DEF_ARN: ${{ steps.register-td.outputs.task_def_arn }}
+          IMAGE_URI: ${{ needs.build-and-push-ecr.outputs.image_uri }}
+        run: |
+          echo "Promovendo imagem imutável ${IMAGE_URI} para o Service permanente de produção..."
+          aws ecs update-service \
+            --cluster "${PROJECT_NAME}-prod-cluster" \
+            --service "${PROJECT_NAME}-prod-service" \
+            --task-definition "${TASK_DEF_ARN}" \
+            --force-new-deployment
+
+          aws ecs wait services-stable \
+            --cluster "${PROJECT_NAME}-prod-cluster" \
+            --services "${PROJECT_NAME}-prod-service"
+
+          echo "Deploy concluído em produção com sucesso!"
