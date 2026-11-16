@@ -1,6 +1,6 @@
-# Arquitetura Multi-Ambiente na AWS (Dev, Staging Efêmeros e Prod Permanente) com ECS, ECR e IAM
+# Arquitetura Multi-Ambiente na AWS (Dev, Staging e Prod) com ECS, ECR e IAM
 
-Repositório de portfólio focado em **Cloud Architecture, DevSecOps e FinOps na AWS**, demonstrando como construir um ciclo completo de entrega contínua com **artefatos imutáveis no Amazon ECR**, **ambientes efêmeros de `dev` e `staging` no Amazon ECS (Fargate)** e **segregação estrita das três identidades IAM**.
+Repositório de portfólio focado em **Cloud Architecture, DevSecOps e FinOps na AWS**, demonstrando como construir um ciclo completo de entrega contínua com **artefatos imutáveis no Amazon ECR**, **ambientes de `dev` e `staging` no Amazon ECS (Fargate)** e **segregação estrita das três identidades IAM**.
 
 ---
 
