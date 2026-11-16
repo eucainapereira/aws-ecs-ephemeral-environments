@@ -9,6 +9,11 @@
 
 data "aws_caller_identity" "current" {}
 
+locals {
+  # Mantém o ID da conta AWS marcado como sensível para ocultá-lo nas saídas de plan/apply
+  aws_account_id = sensitive(coalesce(var.aws_account_id, data.aws_caller_identity.current.account_id))
+}
+
 # =============================================================================
 # 1. IDENTIDADE DO PIPELINE (CI/CD) — GitHub Actions via Federação OIDC
 # =============================================================================
@@ -38,7 +43,7 @@ data "aws_iam_policy_document" "cicd_trust_policy" {
 
     principals {
       type        = "Federated"
-      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/token.actions.githubusercontent.com"]
+      identifiers = ["arn:aws:iam::${local.aws_account_id}:oidc-provider/token.actions.githubusercontent.com"]
     }
 
     condition {
@@ -127,7 +132,18 @@ data "aws_iam_policy_document" "cicd_permissions" {
       "logs:FilterLogEvents"
     ]
     resources = [
-      "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:/ecs/${var.project_name}/*"
+      "arn:aws:logs:${var.aws_region}:${local.aws_account_id}:log-group:/ecs/${var.project_name}/*"
+    ]
+  }
+
+  # Consulta dos ARNs das roles ECS pelo pipeline sem expor ou depender do ID da conta no código
+  statement {
+    sid     = "PermitirConsultaRolesECS"
+    effect  = "Allow"
+    actions = ["iam:GetRole"]
+    resources = [
+      "arn:aws:iam::${local.aws_account_id}:role/${var.project_name}-*-ecsTaskExecutionRole",
+      "arn:aws:iam::${local.aws_account_id}:role/${var.project_name}-*-ecsTaskRole"
     ]
   }
 
@@ -137,8 +153,8 @@ data "aws_iam_policy_document" "cicd_permissions" {
     effect  = "Allow"
     actions = ["iam:PassRole"]
     resources = [
-      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${var.project_name}-*-ecsTaskExecutionRole",
-      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${var.project_name}-*-ecsTaskRole"
+      "arn:aws:iam::${local.aws_account_id}:role/${var.project_name}-*-ecsTaskExecutionRole",
+      "arn:aws:iam::${local.aws_account_id}:role/${var.project_name}-*-ecsTaskRole"
     ]
 
     condition {
@@ -176,7 +192,7 @@ data "aws_iam_policy_document" "ecs_tasks_trust_policy" {
     condition {
       test     = "StringEquals"
       variable = "aws:SourceAccount"
-      values   = [data.aws_caller_identity.current.account_id]
+      values   = [local.aws_account_id]
     }
   }
 }
@@ -275,7 +291,7 @@ data "aws_iam_policy_document" "ecs_task_runtime_permissions" {
       "ssm:GetParametersByPath"
     ]
     resources = [
-      "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project_name}/${var.environment}/*"
+      "arn:aws:ssm:${var.aws_region}:${local.aws_account_id}:parameter/${var.project_name}/${var.environment}/*"
     ]
   }
 
@@ -299,3 +315,4 @@ resource "aws_iam_role_policy" "ecs_task_runtime_inline" {
   role   = aws_iam_role.ecs_task_role.id
   policy = data.aws_iam_policy_document.ecs_task_runtime_permissions.json
 }
+

@@ -47,3 +47,4 @@ Mesmo quando o pipeline encerra os ambientes de `dev` e `staging` ao final dos t
    - Configurados em `infra/terraform/logs.tf` com `skip_destroy = true`.
    - Como o agente do ECS envia continuamente `stdout` e `stderr` para o CloudWatch Logs por meio da `ecsTaskExecutionRole` enquanto a task está rodando, o encerramento da task (`desired-count 0`) **não apaga** os logs gerados durante os testes.
    - Engenheiros conseguem auditar falhas em execuções efêmeras mesmo horas ou dias depois de as tasks terem sido destruídas.
+

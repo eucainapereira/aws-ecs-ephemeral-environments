@@ -55,3 +55,4 @@ sequenceDiagram
 2. **`iam:PassRole` Restrito**: a identidade do pipeline só pode anexar roles às tasks do ECS quando o destino for `ecs-tasks.amazonaws.com` (`Condition: iam:PassedToService`) e exclusivamente para os padrões de ARN `portfolio-app-*-ecsTaskExecutionRole` e `portfolio-app-*-ecsTaskRole`.
 3. **Proteção contra Confused Deputy**: as trust policies das roles de ECS validam `aws:SourceAccount` garantindo que apenas tasks da própria conta AWS possam assumi-las.
 4. **Isolamento por Ambiente no Data Plane**: a `ecsTaskRole` de `dev` só enxerga parâmetros `/portfolio-app/dev/*`, impedindo que uma task de teste acesse segredos ou buckets de `prod`.
+

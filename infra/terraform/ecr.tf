@@ -80,3 +80,4 @@ locals {
   ecr_repository_arn = var.create_shared_resources ? aws_ecr_repository.app[0].arn : data.aws_ecr_repository.existing[0].arn
   ecr_repository_url = var.create_shared_resources ? aws_ecr_repository.app[0].repository_url : data.aws_ecr_repository.existing[0].repository_url
 }
+

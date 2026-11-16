@@ -136,3 +136,4 @@ Acesse `http://localhost:3000/health` ou `http://localhost:3000/info` para inspe
 
 - [Arquitetura IAM no ECS: Pipeline CI/CD vs Execution Role vs Task Role](docs/arquitetura-iam-ecs.md)
 - [Fluxo CI/CD, Ambientes Efêmeros e Imutabilidade no ECR](docs/fluxo-cicd-ambientes-efemeros.md)
+

@@ -16,3 +16,4 @@ resource "aws_cloudwatch_log_group" "ecs_app" {
     Persistencia = "mantido-apos-teardown"
   }
 }
+

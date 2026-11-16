@@ -1,4 +1,4 @@
-aws_region             = "us-east-1"
+aws_region             = "us-east-2"
 project_name           = "portfolio-app"
 ecr_repository_name    = "app"
 environment            = "prod"
@@ -10,3 +10,4 @@ task_cpu               = 512
 task_memory            = 1024
 desired_count          = 2
 log_retention_days     = 90
+

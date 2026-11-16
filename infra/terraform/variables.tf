@@ -1,7 +1,14 @@
 variable "aws_region" {
   description = "Região da AWS onde os recursos serão provisionados."
   type        = string
-  default     = "us-east-1"
+  default     = "us-east-2"
+}
+
+variable "aws_account_id" {
+  description = "ID opcional da conta AWS mantido oculto como sensível; quando nulo, é resolvido em tempo de execução."
+  type        = string
+  default     = null
+  sensitive   = true
 }
 
 variable "project_name" {
@@ -97,3 +104,4 @@ variable "app_artifacts_bucket_arn" {
   type        = string
   default     = "arn:aws:s3:::portfolio-app-runtime-artifacts"
 }
+

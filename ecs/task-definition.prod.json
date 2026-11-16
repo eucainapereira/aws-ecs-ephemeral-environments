@@ -6,8 +6,8 @@
   ],
   "cpu": "512",
   "memory": "1024",
-  "executionRoleArn": "arn:aws:iam::__AWS_ACCOUNT_ID__:role/portfolio-app-prod-ecsTaskExecutionRole",
-  "taskRoleArn": "arn:aws:iam::__AWS_ACCOUNT_ID__:role/portfolio-app-prod-ecsTaskRole",
+  "executionRoleArn": "__EXECUTION_ROLE_ARN__",
+  "taskRoleArn": "__TASK_ROLE_ARN__",
   "containerDefinitions": [
     {
       "name": "app",
@@ -67,3 +67,4 @@
     }
   ]
 }
+

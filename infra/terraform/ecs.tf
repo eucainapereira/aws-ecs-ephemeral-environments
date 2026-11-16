@@ -128,3 +128,4 @@ resource "aws_ecs_service" "app" {
     TipoAmbiente = var.is_ephemeral ? "efemero" : "permanente"
   }
 }
+

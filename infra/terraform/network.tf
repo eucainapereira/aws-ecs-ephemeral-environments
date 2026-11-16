@@ -84,3 +84,4 @@ resource "aws_security_group" "ecs_tasks" {
     Name = "${var.project_name}-${var.environment}-ecs-tasks-sg"
   }
 }
+

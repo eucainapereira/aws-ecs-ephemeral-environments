@@ -51,7 +51,7 @@ function obterStatusTaskRole() {
 
   return {
     ecsTaskRoleInjetada: taskRoleAtiva,
-    regiaoAws: process.env.AWS_REGION || "us-east-1",
+    regiaoAws: process.env.AWS_REGION || "us-east-2",
     bucketRelatoriosConfigurado: Boolean(process.env.APP_ARTIFACTS_BUCKET),
     prefixoParametrosSsm: process.env.SSM_PARAMETER_PREFIX || "nao-configurado"
   };
@@ -146,3 +146,4 @@ module.exports = {
   obterStatusTaskRole,
   registrarLog
 };
+

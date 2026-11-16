@@ -18,7 +18,7 @@ permissions:
   contents: read
 
 env:
-  AWS_REGION: us-east-1
+  AWS_REGION: us-east-2
   PROJECT_NAME: portfolio-app
   ECR_REPOSITORY: app
 
@@ -66,7 +66,11 @@ jobs:
           IMAGE_TAG="dev-${SHORT_SHA}"
           IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
 
-          echo "Gerando artefato imutável: ${IMAGE_URI}"
+          # Mascara o registro ECR e a URI da imagem nos logs públicos do GitHub Actions
+          echo "::add-mask::${ECR_REGISTRY}"
+          echo "::add-mask::${IMAGE_URI}"
+
+          echo "Gerando artefato imutável com tag: ${IMAGE_TAG}"
           docker build \
             --build-arg IMAGE_TAG="${IMAGE_TAG}" \
             --build-arg GIT_SHA="${SHORT_SHA}" \
@@ -80,9 +84,11 @@ jobs:
       - name: Enviar imagem com tag única e imutável para o Amazon ECR
         env:
           IMAGE_URI: ${{ steps.build-info.outputs.image_uri }}
+          IMAGE_TAG: ${{ steps.build-info.outputs.image_tag }}
         run: |
+          echo "::add-mask::${IMAGE_URI}"
           docker push "${IMAGE_URI}"
-          echo "Imagem publicada com sucesso no ECR: ${IMAGE_URI}"
+          echo "Imagem publicada com sucesso no ECR com a tag: ${IMAGE_TAG}"
 
   # ===========================================================================
   # JOB 2: Ambiente Efêmero de DEV (Sobe Service/Task -> Testa -> Encerra)
@@ -110,9 +116,15 @@ jobs:
           IMAGE_TAG: ${{ needs.build-and-push-ecr.outputs.image_tag }}
           SHORT_SHA: ${{ needs.build-and-push-ecr.outputs.short_sha }}
         run: |
-          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          EXECUTION_ROLE_ARN=$(aws iam get-role --role-name "${PROJECT_NAME}-dev-ecsTaskExecutionRole" --query "Role.Arn" --output text)
+          TASK_ROLE_ARN=$(aws iam get-role --role-name "${PROJECT_NAME}-dev-ecsTaskRole" --query "Role.Arn" --output text)
 
-          sed -e "s|__AWS_ACCOUNT_ID__|${AWS_ACCOUNT_ID}|g" \
+          echo "::add-mask::${IMAGE_URI}"
+          echo "::add-mask::${EXECUTION_ROLE_ARN}"
+          echo "::add-mask::${TASK_ROLE_ARN}"
+
+          sed -e "s|__EXECUTION_ROLE_ARN__|${EXECUTION_ROLE_ARN}|g" \
+              -e "s|__TASK_ROLE_ARN__|${TASK_ROLE_ARN}|g" \
               -e "s|__AWS_REGION__|${AWS_REGION}|g" \
               -e "s|__ECR_IMAGE_URI__|${IMAGE_URI}|g" \
               -e "s|__IMAGE_TAG__|${IMAGE_TAG}|g" \
@@ -124,7 +136,8 @@ jobs:
             --query "taskDefinition.taskDefinitionArn" \
             --output text)
 
-          echo "Task Definition registrada: ${TASK_DEF_ARN}"
+          echo "::add-mask::${TASK_DEF_ARN}"
+          echo "Task Definition registrada para DEV (${IMAGE_TAG})."
           echo "task_def_arn=${TASK_DEF_ARN}" >> "$GITHUB_OUTPUT"
 
       - name: Subir Service/Task efêmero no Amazon ECS (DEV)
@@ -217,9 +230,15 @@ jobs:
           IMAGE_TAG: ${{ needs.build-and-push-ecr.outputs.image_tag }}
           SHORT_SHA: ${{ needs.build-and-push-ecr.outputs.short_sha }}
         run: |
-          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          EXECUTION_ROLE_ARN=$(aws iam get-role --role-name "${PROJECT_NAME}-staging-ecsTaskExecutionRole" --query "Role.Arn" --output text)
+          TASK_ROLE_ARN=$(aws iam get-role --role-name "${PROJECT_NAME}-staging-ecsTaskRole" --query "Role.Arn" --output text)
 
-          sed -e "s|__AWS_ACCOUNT_ID__|${AWS_ACCOUNT_ID}|g" \
+          echo "::add-mask::${IMAGE_URI}"
+          echo "::add-mask::${EXECUTION_ROLE_ARN}"
+          echo "::add-mask::${TASK_ROLE_ARN}"
+
+          sed -e "s|__EXECUTION_ROLE_ARN__|${EXECUTION_ROLE_ARN}|g" \
+              -e "s|__TASK_ROLE_ARN__|${TASK_ROLE_ARN}|g" \
               -e "s|__AWS_REGION__|${AWS_REGION}|g" \
               -e "s|__ECR_IMAGE_URI__|${IMAGE_URI}|g" \
               -e "s|__IMAGE_TAG__|${IMAGE_TAG}|g" \
@@ -231,6 +250,8 @@ jobs:
             --query "taskDefinition.taskDefinitionArn" \
             --output text)
 
+          echo "::add-mask::${TASK_DEF_ARN}"
+          echo "Task Definition registrada para STAGING (${IMAGE_TAG})."
           echo "task_def_arn=${TASK_DEF_ARN}" >> "$GITHUB_OUTPUT"
 
       - name: Subir Service/Task efêmero no Amazon ECS (STAGING)
@@ -320,9 +341,15 @@ jobs:
           IMAGE_TAG: ${{ needs.build-and-push-ecr.outputs.image_tag }}
           SHORT_SHA: ${{ needs.build-and-push-ecr.outputs.short_sha }}
         run: |
-          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          EXECUTION_ROLE_ARN=$(aws iam get-role --role-name "${PROJECT_NAME}-prod-ecsTaskExecutionRole" --query "Role.Arn" --output text)
+          TASK_ROLE_ARN=$(aws iam get-role --role-name "${PROJECT_NAME}-prod-ecsTaskRole" --query "Role.Arn" --output text)
 
-          sed -e "s|__AWS_ACCOUNT_ID__|${AWS_ACCOUNT_ID}|g" \
+          echo "::add-mask::${IMAGE_URI}"
+          echo "::add-mask::${EXECUTION_ROLE_ARN}"
+          echo "::add-mask::${TASK_ROLE_ARN}"
+
+          sed -e "s|__EXECUTION_ROLE_ARN__|${EXECUTION_ROLE_ARN}|g" \
+              -e "s|__TASK_ROLE_ARN__|${TASK_ROLE_ARN}|g" \
               -e "s|__AWS_REGION__|${AWS_REGION}|g" \
               -e "s|__ECR_IMAGE_URI__|${IMAGE_URI}|g" \
               -e "s|__IMAGE_TAG__|${IMAGE_TAG}|g" \
@@ -334,15 +361,19 @@ jobs:
             --query "taskDefinition.taskDefinitionArn" \
             --output text)
 
-          echo "Nova revisão registrada para PROD: ${TASK_DEF_ARN}"
+          echo "::add-mask::${TASK_DEF_ARN}"
+          echo "Nova revisão registrada para PROD (${IMAGE_TAG})."
           echo "task_def_arn=${TASK_DEF_ARN}" >> "$GITHUB_OUTPUT"
 
       - name: Atualizar Service permanente de PRODUÇÃO com zero-downtime
         env:
           TASK_DEF_ARN: ${{ steps.register-td.outputs.task_def_arn }}
           IMAGE_URI: ${{ needs.build-and-push-ecr.outputs.image_uri }}
+          IMAGE_TAG: ${{ needs.build-and-push-ecr.outputs.image_tag }}
         run: |
-          echo "Promovendo imagem imutável ${IMAGE_URI} para o Service permanente de produção..."
+          echo "::add-mask::${IMAGE_URI}"
+          echo "::add-mask::${TASK_DEF_ARN}"
+          echo "Promovendo imagem imutável (${IMAGE_TAG}) para o Service permanente de produção..."
           aws ecs update-service \
             --cluster "${PROJECT_NAME}-prod-cluster" \
             --service "${PROJECT_NAME}-prod-service" \
@@ -354,3 +385,4 @@ jobs:
             --services "${PROJECT_NAME}-prod-service"
 
           echo "Deploy concluído em produção com sucesso!"
+

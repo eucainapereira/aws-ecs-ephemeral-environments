@@ -12,7 +12,7 @@ terraform {
   # backend "s3" {
   #   bucket         = "seu-bucket-terraform-state"
   #   key            = "portfolio-ecs-ambientes/terraform.tfstate"
-  #   region         = "us-east-1"
+  #   region         = "us-east-2"
   #   dynamodb_table = "terraform-state-lock"
   #   encrypt        = true
   # }
@@ -30,3 +30,4 @@ provider "aws" {
     }
   }
 }
+
