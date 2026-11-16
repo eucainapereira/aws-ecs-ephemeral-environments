@@ -92,46 +92,6 @@ A separação rigorosa de privilégios garante que **a pipeline**, **o agente de
 ```
 
 ---
-
-## Como Provisionar e Testar
-
-### 1. Provisionar a Infraestrutura com Terraform
-
-Provisione primeiro o ambiente `dev` (que também cria os recursos compartilhados: ECR e Usuário IAM do Pipeline CI/CD) e em seguida `staging` e `prod`:
-
-```bash
-cd infra/terraform
-terraform init
-
-# Provisiona recursos compartilhados + ambiente efêmero de DEV
-terraform workspace new dev || terraform workspace select dev
-terraform apply -var-file="environments/dev.tfvars"
-
-# Provisiona ambiente efêmero de STAGING
-terraform workspace new staging || terraform workspace select staging
-terraform apply -var-file="environments/staging.tfvars"
-
-# Provisiona ambiente permanente de PROD
-terraform workspace new prod || terraform workspace select prod
-terraform apply -var-file="environments/prod.tfvars"
-```
-
-### 2. Configurar o GitHub Actions
-
-1. Nos segredos do repositório GitHub, configure `AWS_ACCESS_KEY_ID` e `AWS_SECRET_ACCESS_KEY` com os outputs `cicd_aws_access_key_id` e `cicd_aws_secret_access_key` gerados pelo Terraform.
-2. Em **Settings → Environments**, crie os environments `dev`, `staging` e `production` (adicionando revisores obrigatórios em `production`).
-
-### 3. Testar a Aplicação Localmente com Docker
-
-```bash
-docker build -t app:dev-local ./app
-docker run --rm -p 3000:3000 -e APP_ENV=dev -e IMAGE_TAG=dev-local app:dev-local
-```
-
-Acesse `http://localhost:3000/health` ou `http://localhost:3000/info` para inspecionar a resposta e os logs JSON emitidos no console.
-
----
-
 ## Documentação Complementar
 
 - [Arquitetura IAM no ECS: Pipeline CI/CD vs Execution Role vs Task Role](docs/arquitetura-iam-ecs.md)
