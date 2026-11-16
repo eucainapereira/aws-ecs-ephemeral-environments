@@ -1,5 +1,5 @@
 {
-  "name": "portfolio-ecs-multi-env-app",
+  "name": "aws-ecs-ephemeral-environments",
   "version": "1.0.0",
   "description": "Aplicação de referência em Node.js para demonstrar pipeline multi-ambiente (dev, staging e prod) no Amazon ECS com tags imutáveis no ECR e segregação de IAM Roles.",
   "main": "src/server.js",

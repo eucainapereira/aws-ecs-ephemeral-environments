@@ -41,7 +41,7 @@ describe("API de referência multi-ambiente no Amazon ECS", () => {
     assert.equal(resposta.status, 200);
 
     const corpo = await resposta.json();
-    assert.equal(corpo.servico, "portfolio-ecs-multi-env");
+    assert.equal(corpo.servico, "aws-ecs-ephemeral-environments");
     assert.equal(corpo.ambiente, "staging");
     assert.equal(corpo.tipoAmbiente, "efemero");
     assert.equal(corpo.commitSha, "a1b2c3d");

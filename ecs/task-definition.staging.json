@@ -1,5 +1,5 @@
 {
-  "family": "portfolio-app-staging",
+  "family": "aws-ecs-ephemeral-environments-staging",
   "networkMode": "awsvpc",
   "requiresCompatibilities": [
     "FARGATE"
@@ -43,13 +43,13 @@
         },
         {
           "name": "SSM_PARAMETER_PREFIX",
-          "value": "/portfolio-app/staging/"
+          "value": "/aws-ecs-ephemeral-environments/staging/"
         }
       ],
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {
-          "awslogs-group": "/ecs/portfolio-app/staging",
+          "awslogs-group": "/ecs/aws-ecs-ephemeral-environments/staging",
           "awslogs-region": "__AWS_REGION__",
           "awslogs-stream-prefix": "ecs-staging"
         }

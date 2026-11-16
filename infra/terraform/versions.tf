@@ -11,7 +11,7 @@ terraform {
   # Exemplo de backend remoto recomendado para produção (descomente ao provisionar na AWS)
   # backend "s3" {
   #   bucket         = "seu-bucket-terraform-state"
-  #   key            = "portfolio-ecs-ambientes/terraform.tfstate"
+  #   key            = "aws-ecs-ephemeral-environments/terraform.tfstate"
   #   region         = "us-east-2"
   #   dynamodb_table = "terraform-state-lock"
   #   encrypt        = true

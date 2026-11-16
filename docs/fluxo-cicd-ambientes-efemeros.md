@@ -29,7 +29,7 @@ flowchart TD
 | **Capacity Provider** | `FARGATE_SPOT` | `FARGATE_SPOT` | `FARGATE` |
 | **Estado Fora da Janela de Pipeline** | `desired_count = 0` (sem tasks em execução) | `desired_count = 0` (sem tasks em execução) | `desired_count = 2` (alta disponibilidade contínua) |
 | **Tag da Imagem Utilizada** | `app:dev-<short_sha>` | Exata mesma `app:dev-<short_sha>` | Exata mesma `app:dev-<short_sha>` |
-| **Grupo de Logs no CloudWatch** | `/ecs/portfolio-app/dev` (14 dias) | `/ecs/portfolio-app/staging` (30 dias) | `/ecs/portfolio-app/prod` (90 dias) |
+| **Grupo de Logs no CloudWatch** | `/ecs/aws-ecs-ephemeral-environments/dev` (14 dias) | `/ecs/aws-ecs-ephemeral-environments/staging` (30 dias) | `/ecs/aws-ecs-ephemeral-environments/prod` (90 dias) |
 | **Após Término dos Testes** | Service/Task encerrado automaticamente (`if: always()`) | Service/Task encerrado automaticamente (`if: always()`) | Mantido ativo com rolling update zero-downtime |
 
 ---

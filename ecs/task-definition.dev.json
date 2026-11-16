@@ -1,5 +1,5 @@
 {
-  "family": "portfolio-app-dev",
+  "family": "aws-ecs-ephemeral-environments-dev",
   "networkMode": "awsvpc",
   "requiresCompatibilities": [
     "FARGATE"
@@ -43,13 +43,13 @@
         },
         {
           "name": "SSM_PARAMETER_PREFIX",
-          "value": "/portfolio-app/dev/"
+          "value": "/aws-ecs-ephemeral-environments/dev/"
         }
       ],
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {
-          "awslogs-group": "/ecs/portfolio-app/dev",
+          "awslogs-group": "/ecs/aws-ecs-ephemeral-environments/dev",
           "awslogs-region": "__AWS_REGION__",
           "awslogs-stream-prefix": "ecs-dev"
         }

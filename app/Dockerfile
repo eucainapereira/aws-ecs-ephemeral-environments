@@ -18,7 +18,7 @@ FROM node:20-alpine AS runtime
 ARG IMAGE_TAG=dev-local
 ARG GIT_SHA=local
 
-LABEL org.opencontainers.image.title="portfolio-ecs-multi-env" \
+LABEL org.opencontainers.image.title="aws-ecs-ephemeral-environments" \
       org.opencontainers.image.description="Aplicação containerizada de referência para ambientes dev, staging e prod no Amazon ECS" \
       org.opencontainers.image.revision="${GIT_SHA}"
 

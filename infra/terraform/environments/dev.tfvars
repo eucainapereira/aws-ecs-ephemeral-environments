@@ -1,5 +1,5 @@
 aws_region             = "us-east-2"
-project_name           = "portfolio-app"
+project_name           = "aws-ecs-ephemeral-environments"
 ecr_repository_name    = "app"
 environment            = "dev"
 is_ephemeral           = true

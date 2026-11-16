@@ -79,7 +79,7 @@ function criarServidor() {
     if (metodo === "GET" && (caminho === "/" || caminho === "/info")) {
       const ambiente = process.env.APP_ENV || "local";
       const info = {
-        servico: "portfolio-ecs-multi-env",
+        servico: "aws-ecs-ephemeral-environments",
         ambiente,
         tipoAmbiente: ambiente === "prod" ? "permanente" : "efemero",
         imagemTag: process.env.IMAGE_TAG || "dev-local",

@@ -14,7 +14,7 @@ variable "aws_account_id" {
 variable "project_name" {
   description = "Nome base do projeto usado para prefixar recursos e tags."
   type        = string
-  default     = "portfolio-app"
+  default     = "aws-ecs-ephemeral-environments"
 }
 
 variable "ecr_repository_name" {
@@ -42,7 +42,7 @@ variable "is_ephemeral" {
 variable "github_repo" {
   description = "Repositório GitHub do projeto (formato: usuario/repo)."
   type        = string
-  default     = "eucainapereira/ambientes-ecs-ecr-cicd"
+  default     = "eucainapereira/aws-ecs-ephemeral-environments"
 }
 
 variable "create_shared_resources" {
@@ -96,6 +96,6 @@ variable "log_retention_days" {
 variable "app_artifacts_bucket_arn" {
   description = "ARN de um bucket S3 opcional que a aplicação acessa em runtime utilizando a ecsTaskRole."
   type        = string
-  default     = "arn:aws:s3:::portfolio-app-runtime-artifacts"
+  default     = "arn:aws:s3:::aws-ecs-ephemeral-environments-runtime-artifacts"
 }
 

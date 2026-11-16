@@ -18,7 +18,7 @@ permissions:
 
 env:
   AWS_REGION: us-east-2
-  PROJECT_NAME: portfolio-app
+  PROJECT_NAME: aws-ecs-ephemeral-environments
   ECR_REPOSITORY: app
 
 jobs:
@@ -146,7 +146,7 @@ jobs:
           TASK_DEF_ARN: ${{ steps.register-td.outputs.task_def_arn }}
         run: |
           # O ECS Agent usará a ecsTaskExecutionRole para puxar a imagem do ECR
-          # e enviar stdout/stderr do container para /ecs/portfolio-app/dev.
+          # e enviar stdout/stderr do container para /ecs/aws-ecs-ephemeral-environments/dev.
           # O código da aplicação usará a ecsTaskRole em tempo de execução.
           aws ecs update-service \
             --cluster "${PROJECT_NAME}-dev-cluster" \

@@ -28,7 +28,7 @@ sequenceDiagram
     Agent->>ECR: Pull da imagem privada app:dev-a1b2c3d
     Agent->>App: Inicia container da aplicação
     App-->>Agent: Emite logs JSON em stdout/stderr
-    Agent->>CW: Envia eventos para /ecs/portfolio-app/dev
+    Agent->>CW: Envia eventos para /ecs/aws-ecs-ephemeral-environments/dev
     App->>AWS: Lê parâmetros/objetos usando ecsTaskRole
     GHA->>GHA: Executa testes funcionais no endpoint /health e /info
     GHA->>ECS: Encerra Task/Service efêmero (desired=0)
@@ -41,18 +41,18 @@ sequenceDiagram
 
 | Critério | Identidade do Pipeline (CI/CD) | ECS Task Execution Role (`ecsTaskExecutionRole`) | ECS Task Role (`ecsTaskRole`) |
 | :--- | :--- | :--- | :--- |
-| **Nome no Terraform** | `portfolio-app-cicd-pipeline-user` | `portfolio-app-<env>-ecsTaskExecutionRole` | `portfolio-app-<env>-ecsTaskRole` |
+| **Nome no Terraform** | `aws-ecs-ephemeral-environments-cicd-pipeline-user` | `aws-ecs-ephemeral-environments-<env>-ecsTaskExecutionRole` | `aws-ecs-ephemeral-environments-<env>-ecsTaskRole` |
 | **Tipo de Autenticação / Trust** | Usuário IAM com Chaves Estáticas (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) | `ecs-tasks.amazonaws.com` | `ecs-tasks.amazonaws.com` |
 | **Plano de Atuação** | Automação / Entrega Contínua | Control Plane do ECS (Agente / Daemon) | Data Plane (Código da Aplicação) |
-| **Ações Permitidas** | `ecr:PutImage`, `ecs:RegisterTaskDefinition`, `ecs:CreateService`, `ecs:UpdateService`, `ecs:DeleteService`, `ecs:RunTask`, `ecs:StopTask`, `iam:PassRole` | `ecr:GetAuthorizationToken`, `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer`, `logs:CreateLogStream`, `logs:PutLogEvents` | `ssm:GetParameter*` em `/portfolio-app/<env>/*` e `s3:GetObject`/`PutObject` no prefixo `<env>/*` |
+| **Ações Permitidas** | `ecr:PutImage`, `ecs:RegisterTaskDefinition`, `ecs:CreateService`, `ecs:UpdateService`, `ecs:DeleteService`, `ecs:RunTask`, `ecs:StopTask`, `iam:PassRole` | `ecr:GetAuthorizationToken`, `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer`, `logs:CreateLogStream`, `logs:PutLogEvents` | `ssm:GetParameter*` em `/aws-ecs-ephemeral-environments/<env>/*` e `s3:GetObject`/`PutObject` no prefixo `<env>/*` |
 | **Privilégios Bloqueados** | Não tem acesso direto a dados da aplicação no S3/SSM | Não cria/deleta services ECS e não lê dados de negócio da aplicação | Não pode puxar imagens do ECR, não gerencia ECS e não acessa outros ambientes |
 
 ---
 
 ## Controles de Segurança Aplicados em `infra/terraform/iam.tf`
 
-1. **Chaves Estáticas com Menor Privilégio no CI/CD**: o usuário IAM do pipeline (`portfolio-app-cicd-pipeline-user`) autentica via `AWS_ACCESS_KEY_ID` e `AWS_SECRET_ACCESS_KEY` armazenadas nos Secrets do GitHub Actions, com escopo restrito às operações de ECR e ECS do projeto.
-2. **`iam:PassRole` Restrito**: a identidade do pipeline só pode anexar roles às tasks do ECS quando o destino for `ecs-tasks.amazonaws.com` (`Condition: iam:PassedToService`) e exclusivamente para os padrões de ARN `portfolio-app-*-ecsTaskExecutionRole` e `portfolio-app-*-ecsTaskRole`.
+1. **Chaves Estáticas com Menor Privilégio no CI/CD**: o usuário IAM do pipeline (`aws-ecs-ephemeral-environments-cicd-pipeline-user`) autentica via `AWS_ACCESS_KEY_ID` e `AWS_SECRET_ACCESS_KEY` armazenadas nos Secrets do GitHub Actions, com escopo restrito às operações de ECR e ECS do projeto.
+2. **`iam:PassRole` Restrito**: a identidade do pipeline só pode anexar roles às tasks do ECS quando o destino for `ecs-tasks.amazonaws.com` (`Condition: iam:PassedToService`) e exclusivamente para os padrões de ARN `aws-ecs-ephemeral-environments-*-ecsTaskExecutionRole` e `aws-ecs-ephemeral-environments-*-ecsTaskRole`.
 3. **Proteção contra Confused Deputy**: as trust policies das roles de ECS validam `aws:SourceAccount` garantindo que apenas tasks da própria conta AWS possam assumi-las.
-4. **Isolamento por Ambiente no Data Plane**: a `ecsTaskRole` de `dev` só enxerga parâmetros `/portfolio-app/dev/*`, impedindo que uma task de teste acesse segredos ou buckets de `prod`.
+4. **Isolamento por Ambiente no Data Plane**: a `ecsTaskRole` de `dev` só enxerga parâmetros `/aws-ecs-ephemeral-environments/dev/*`, impedindo que uma task de teste acesse segredos ou buckets de `prod`.
 
