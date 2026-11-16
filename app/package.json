@@ -1,0 +1,14 @@
+{
+  "name": "portfolio-ecs-multi-env-app",
+  "version": "1.0.0",
+  "description": "Aplicação de referência em Node.js para demonstrar pipeline multi-ambiente (dev, staging e prod) no Amazon ECS com tags imutáveis no ECR e segregação de IAM Roles.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "license": "MIT"
+}
