@@ -40,21 +40,15 @@ variable "is_ephemeral" {
 }
 
 variable "github_repo" {
-  description = "Repositório GitHub autorizado via OIDC a assumir a Identidade do Pipeline CI/CD (formato: usuario/repo)."
+  description = "Repositório GitHub do projeto (formato: usuario/repo)."
   type        = string
   default     = "eucainapereira/ambientes-ecs-ecr-cicd"
 }
 
 variable "create_shared_resources" {
-  description = "Define se este workspace cria os recursos compartilhados entre ambientes (ECR, OIDC e Role do Pipeline CI/CD)."
+  description = "Define se este workspace cria os recursos compartilhados entre ambientes (ECR e Usuário IAM do Pipeline CI/CD)."
   type        = bool
   default     = false
-}
-
-variable "create_oidc_provider" {
-  description = "Define se o provedor OIDC do GitHub Actions deve ser criado na conta AWS."
-  type        = bool
-  default     = true
 }
 
 variable "vpc_cidr" {

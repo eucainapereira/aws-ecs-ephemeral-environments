@@ -12,7 +12,7 @@ Este documento detalha como as três identidades funcionam em conjunto neste pro
 sequenceDiagram
     autonumber
     actor Dev as Desenvolvedor
-    participant GHA as Pipeline CI/CD (CicdPipelineRole)
+    participant GHA as Pipeline CI/CD (CicdPipelineUser)
     participant ECR as Amazon ECR (Imutável)
     participant ECS as Amazon ECS Control Plane
     participant Agent as ECS Agent (ecsTaskExecutionRole)
@@ -21,7 +21,7 @@ sequenceDiagram
     participant AWS as AWS SSM / S3
 
     Dev->>GHA: Push na branch main
-    GHA->>GHA: Assume CicdPipelineRole via OIDC
+    GHA->>GHA: Autentica com chaves estáticas IAM (AWS_ACCESS_KEY_ID)
     GHA->>ECR: Push da imagem app:dev-a1b2c3d
     GHA->>ECS: RegisterTaskDefinition + UpdateService (desired=1)
     ECS->>Agent: Agenda Task Fargate (Execution + Task Roles)
@@ -37,21 +37,21 @@ sequenceDiagram
 
 ---
 
-## Comparativo Técnico das Três Roles
+## Comparativo Técnico das Três Identidades
 
 | Critério | Identidade do Pipeline (CI/CD) | ECS Task Execution Role (`ecsTaskExecutionRole`) | ECS Task Role (`ecsTaskRole`) |
 | :--- | :--- | :--- | :--- |
-| **Nome no Terraform** | `portfolio-app-cicd-pipeline-role` | `portfolio-app-<env>-ecsTaskExecutionRole` | `portfolio-app-<env>-ecsTaskRole` |
-| **Entidade Confiável (Trust Policy)** | `token.actions.githubusercontent.com` (OIDC) | `ecs-tasks.amazonaws.com` | `ecs-tasks.amazonaws.com` |
+| **Nome no Terraform** | `portfolio-app-cicd-pipeline-user` | `portfolio-app-<env>-ecsTaskExecutionRole` | `portfolio-app-<env>-ecsTaskRole` |
+| **Tipo de Autenticação / Trust** | Usuário IAM com Chaves Estáticas (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) | `ecs-tasks.amazonaws.com` | `ecs-tasks.amazonaws.com` |
 | **Plano de Atuação** | Automação / Entrega Contínua | Control Plane do ECS (Agente / Daemon) | Data Plane (Código da Aplicação) |
 | **Ações Permitidas** | `ecr:PutImage`, `ecs:RegisterTaskDefinition`, `ecs:CreateService`, `ecs:UpdateService`, `ecs:DeleteService`, `ecs:RunTask`, `ecs:StopTask`, `iam:PassRole` | `ecr:GetAuthorizationToken`, `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer`, `logs:CreateLogStream`, `logs:PutLogEvents` | `ssm:GetParameter*` em `/portfolio-app/<env>/*` e `s3:GetObject`/`PutObject` no prefixo `<env>/*` |
-| **Privilégios Bloqueados** | Não tem acesso direto a dados da aplicação no S3/SSM e não usa chaves IAM estáticas | Não cria/deleta services ECS e não lê dados de negócio da aplicação | Não pode puxar imagens do ECR, não gerencia ECS e não acessa outros ambientes |
+| **Privilégios Bloqueados** | Não tem acesso direto a dados da aplicação no S3/SSM | Não cria/deleta services ECS e não lê dados de negócio da aplicação | Não pode puxar imagens do ECR, não gerencia ECS e não acessa outros ambientes |
 
 ---
 
 ## Controles de Segurança Aplicados em `infra/terraform/iam.tf`
 
-1. **Zero Chaves Estáticas no CI/CD**: o GitHub Actions autentica na AWS via Federação OIDC (`sts:AssumeRoleWithWebIdentity`), restringindo o claim `token.actions.githubusercontent.com:sub` ao repositório autorizado.
+1. **Chaves Estáticas com Menor Privilégio no CI/CD**: o usuário IAM do pipeline (`portfolio-app-cicd-pipeline-user`) autentica via `AWS_ACCESS_KEY_ID` e `AWS_SECRET_ACCESS_KEY` armazenadas nos Secrets do GitHub Actions, com escopo restrito às operações de ECR e ECS do projeto.
 2. **`iam:PassRole` Restrito**: a identidade do pipeline só pode anexar roles às tasks do ECS quando o destino for `ecs-tasks.amazonaws.com` (`Condition: iam:PassedToService`) e exclusivamente para os padrões de ARN `portfolio-app-*-ecsTaskExecutionRole` e `portfolio-app-*-ecsTaskRole`.
 3. **Proteção contra Confused Deputy**: as trust policies das roles de ECS validam `aws:SourceAccount` garantindo que apenas tasks da própria conta AWS possam assumi-las.
 4. **Isolamento por Ambiente no Data Plane**: a `ecsTaskRole` de `dev` só enxerga parâmetros `/portfolio-app/dev/*`, impedindo que uma task de teste acesse segredos ou buckets de `prod`.

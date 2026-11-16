@@ -15,62 +15,30 @@ locals {
 }
 
 # =============================================================================
-# 1. IDENTIDADE DO PIPELINE (CI/CD) — GitHub Actions via Federação OIDC
+# 1. IDENTIDADE DO PIPELINE (CI/CD) — Usuário IAM com Chaves Estáticas
 # =============================================================================
 # Responsabilidade:
-#   - Autenticar sem chaves estáticas (sem AWS_ACCESS_KEY_ID/SECRET_ACCESS_KEY)
+#   - Autenticar no GitHub Actions utilizando chaves estáticas (AWS_ACCESS_KEY_ID e AWS_SECRET_ACCESS_KEY)
 #   - Fazer build da imagem Docker e enviar com tag imutável para o ECR
 #   - Registrar novas revisões da Task Definition no Amazon ECS
 #   - Criar/atualizar Services/Tasks em dev, staging e prod
 #   - Destruir/encerrar Services/Tasks de dev e staging ao término dos testes
 # =============================================================================
 
-resource "aws_iam_openid_connect_provider" "github" {
-  count = var.create_shared_resources && var.create_oidc_provider ? 1 : 0
-
-  url             = "https://token.actions.githubusercontent.com"
-  client_id_list  = ["sts.amazonaws.com"]
-  thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1", "1c58a3a8518e8759bf075b76b750d4f2df264fcd"]
-}
-
-data "aws_iam_policy_document" "cicd_trust_policy" {
+resource "aws_iam_user" "cicd_pipeline_user" {
   count = var.create_shared_resources ? 1 : 0
 
-  statement {
-    sid     = "PermitirAssuncaoViaGitHubOIDC"
-    effect  = "Allow"
-    actions = ["sts:AssumeRoleWithWebIdentity"]
-
-    principals {
-      type        = "Federated"
-      identifiers = ["arn:aws:iam::${local.aws_account_id}:oidc-provider/token.actions.githubusercontent.com"]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "token.actions.githubusercontent.com:aud"
-      values   = ["sts.amazonaws.com"]
-    }
-
-    # Restringe a role apenas às execuções oriundas deste repositório específico
-    condition {
-      test     = "StringLike"
-      variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repo}:*"]
-    }
-  }
-}
-
-resource "aws_iam_role" "cicd_pipeline_role" {
-  count = var.create_shared_resources ? 1 : 0
-
-  name               = "${var.project_name}-cicd-pipeline-role"
-  assume_role_policy = data.aws_iam_policy_document.cicd_trust_policy[0].json
-  description        = "Identidade do Pipeline CI/CD: envia imagens ao ECR e gerencia o ciclo de vida no ECS (cria/atualiza dev, staging, prod e encerra dev/staging)."
+  name = "${var.project_name}-cicd-pipeline-user"
 
   tags = {
     PapelArquitetural = "Pipeline-CICD"
   }
+}
+
+resource "aws_iam_access_key" "cicd_pipeline_keys" {
+  count = var.create_shared_resources ? 1 : 0
+
+  user = aws_iam_user.cicd_pipeline_user[0].name
 }
 
 data "aws_iam_policy_document" "cicd_permissions" {
@@ -165,11 +133,11 @@ data "aws_iam_policy_document" "cicd_permissions" {
   }
 }
 
-resource "aws_iam_role_policy" "cicd_pipeline_inline" {
+resource "aws_iam_user_policy" "cicd_pipeline_inline" {
   count = var.create_shared_resources ? 1 : 0
 
   name   = "${var.project_name}-cicd-pipeline-policy"
-  role   = aws_iam_role.cicd_pipeline_role[0].id
+  user   = aws_iam_user.cicd_pipeline_user[0].name
   policy = data.aws_iam_policy_document.cicd_permissions[0].json
 }
 
@@ -264,7 +232,7 @@ resource "aws_iam_role_policy" "ecs_task_execution_inline" {
 # =============================================================================
 # Responsabilidade:
 #   - Usada EXCLUSIVAMENTE pelo código da aplicação em tempo de execução dentro
-#     do container (via AWS SDK utilizando as credenciais temporárias injetadas
+#     do container (via AWS SDK utilizando as credenciais da role injetadas
 #     em AWS_CONTAINER_CREDENTIALS_RELATIVE_URI).
 #   - Concede apenas acesso de negócio ao respectivo ambiente (ex.: parâmetros
 #     no SSM Parameter Store e prefixo S3 do ambiente), sem permissões de ECR

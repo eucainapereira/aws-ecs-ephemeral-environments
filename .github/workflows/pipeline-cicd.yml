@@ -14,7 +14,6 @@ on:
         type: string
 
 permissions:
-  id-token: write # Necessário para autenticação OIDC na AWS (sem chaves estáticas)
   contents: read
 
 env:
@@ -47,10 +46,11 @@ jobs:
         working-directory: app
         run: npm test
 
-      - name: Assumir Identidade do Pipeline (CI/CD) via OIDC
+      - name: Configurar Identidade do Pipeline (CI/CD) com chaves estáticas
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_CICD_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login no Amazon ECR
@@ -103,10 +103,11 @@ jobs:
       - name: Checkout do código-fonte
         uses: actions/checkout@v4
 
-      - name: Assumir Identidade do Pipeline (CI/CD) via OIDC
+      - name: Configurar Identidade do Pipeline (CI/CD) com chaves estáticas
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_CICD_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Registrar nova revisão da Task Definition (DEV) apontando para a tag imutável
@@ -217,10 +218,11 @@ jobs:
       - name: Checkout do código-fonte
         uses: actions/checkout@v4
 
-      - name: Assumir Identidade do Pipeline (CI/CD) via OIDC
+      - name: Configurar Identidade do Pipeline (CI/CD) com chaves estáticas
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_CICD_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Registrar revisão da Task Definition (STAGING) reutilizando a mesma imagem do ECR
@@ -328,10 +330,11 @@ jobs:
       - name: Checkout do código-fonte
         uses: actions/checkout@v4
 
-      - name: Assumir Identidade do Pipeline (CI/CD) via OIDC
+      - name: Configurar Identidade do Pipeline (CI/CD) com chaves estáticas
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_CICD_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Registrar Task Definition (PROD) promovendo a exata mesma imagem testada

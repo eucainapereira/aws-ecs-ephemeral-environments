@@ -4,9 +4,21 @@ output "ecr_repository_url" {
   sensitive   = true
 }
 
-output "cicd_pipeline_role_arn" {
-  description = "ARN da Identidade do Pipeline (CI/CD) usada pelo GitHub Actions via OIDC."
-  value       = var.create_shared_resources ? aws_iam_role.cicd_pipeline_role[0].arn : null
+output "cicd_pipeline_user_arn" {
+  description = "ARN da Identidade do Pipeline (CI/CD) usada pelo GitHub Actions com chaves estáticas."
+  value       = var.create_shared_resources ? aws_iam_user.cicd_pipeline_user[0].arn : null
+  sensitive   = true
+}
+
+output "cicd_aws_access_key_id" {
+  description = "Access Key ID estática da Identidade do Pipeline (CI/CD)."
+  value       = var.create_shared_resources ? aws_iam_access_key.cicd_pipeline_keys[0].id : null
+  sensitive   = true
+}
+
+output "cicd_aws_secret_access_key" {
+  description = "Secret Access Key estática da Identidade do Pipeline (CI/CD)."
+  value       = var.create_shared_resources ? aws_iam_access_key.cicd_pipeline_keys[0].secret : null
   sensitive   = true
 }
 

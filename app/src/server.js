@@ -42,7 +42,7 @@ function responderJson(res, statusCode, payload) {
 /**
  * Lê de forma segura os metadados das credenciais injetadas pelo ECS
  * para a `ecsTaskRole` (data plane / tempo de execução).
- * Nunca expõe segredos ou tokens temporários na resposta HTTP.
+ * Nunca expõe segredos ou credenciais na resposta HTTP.
  */
 function obterStatusTaskRole() {
   const uriRelativa = process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI;

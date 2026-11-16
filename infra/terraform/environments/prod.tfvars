@@ -4,7 +4,6 @@ ecr_repository_name    = "app"
 environment            = "prod"
 is_ephemeral           = false
 create_shared_resources = false
-create_oidc_provider   = false
 vpc_cidr               = "10.30.0.0/16"
 task_cpu               = 512
 task_memory            = 1024
