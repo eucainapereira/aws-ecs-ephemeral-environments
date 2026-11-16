@@ -1,0 +1,69 @@
+{
+  "family": "portfolio-app-prod",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::__AWS_ACCOUNT_ID__:role/portfolio-app-prod-ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::__AWS_ACCOUNT_ID__:role/portfolio-app-prod-ecsTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "app",
+      "image": "__ECR_IMAGE_URI__",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 3000,
+          "hostPort": 3000,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "APP_ENV",
+          "value": "prod"
+        },
+        {
+          "name": "PORT",
+          "value": "3000"
+        },
+        {
+          "name": "IMAGE_TAG",
+          "value": "__IMAGE_TAG__"
+        },
+        {
+          "name": "GIT_SHA",
+          "value": "__GIT_SHA__"
+        },
+        {
+          "name": "AWS_REGION",
+          "value": "__AWS_REGION__"
+        },
+        {
+          "name": "SSM_PARAMETER_PREFIX",
+          "value": "/portfolio-app/prod/"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/portfolio-app/prod",
+          "awslogs-region": "__AWS_REGION__",
+          "awslogs-stream-prefix": "ecs-prod"
+        }
+      },
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:3000/health || exit 1"
+        ],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 15
+      }
+    }
+  ]
+}
