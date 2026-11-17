@@ -47,6 +47,8 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
+          # Evita que o runner descarte outputs contendo a URI do ECR como "secret"
+          mask-aws-account-id: false
 
       - name: Garantir existência do repositório imutável no Amazon ECR
         run: |
@@ -72,9 +74,10 @@ jobs:
           IMAGE_TAG="${BRANCH_NAME}-${SHORT_SHA}"
           IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
 
-          # Mascara o registro ECR e a URI da imagem nos logs públicos do GitHub Actions
-          echo "::add-mask::${ECR_REGISTRY}"
-          echo "::add-mask::${IMAGE_URI}"
+          if [ -z "${IMAGE_URI}" ] || [ -z "${ECR_REGISTRY}" ]; then
+            echo "ERRO: Falha ao compor IMAGE_URI no build."
+            exit 1
+          fi
 
           if aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids imageTag="${IMAGE_TAG}" >/dev/null 2>&1; then
             echo "A tag imutável ${IMAGE_TAG} já existe no ECR. Reutilizando imagem existente."
@@ -91,6 +94,7 @@ jobs:
           echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
           echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
           echo "image_uri=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
+          echo "Outputs exportados do Job 1 para tag ${IMAGE_TAG}."
 
   # ===========================================================================
   # JOB 2: Branch DEV -> Sobe o Ambiente DEV no ECS e Mantém Ativo com Link
@@ -122,6 +126,23 @@ jobs:
           IMAGE_TAG: ${{ needs.build-and-push-ecr.outputs.image_tag }}
           SHORT_SHA: ${{ needs.build-and-push-ecr.outputs.short_sha }}
         run: |
+          # Fallback caso alguma política do runner filtre a URI no output entre jobs
+          if [ -z "${IMAGE_TAG}" ]; then
+            SHORT_SHA="${GITHUB_SHA::7}"
+            IMAGE_TAG="${GITHUB_REF_NAME}-${SHORT_SHA}"
+          fi
+          if [ -z "${IMAGE_URI}" ]; then
+            REPO_URI=$(aws ecr describe-repositories --repository-names "${ECR_REPOSITORY}" --query "repositories[0].repositoryUri" --output text 2>/dev/null || true)
+            if [ -n "${REPO_URI}" ] && [ "${REPO_URI}" != "None" ]; then
+              IMAGE_URI="${REPO_URI}:${IMAGE_TAG}"
+            fi
+          fi
+
+          if [ -z "$IMAGE_URI" ]; then
+            echo "ERRO: IMAGE_URI está vazia! Abortando registro da Task Definition."
+            exit 1
+          fi
+
           # Garante que o Log Group exista no CloudWatch Logs
           aws logs create-log-group --log-group-name "/ecs/${PROJECT_NAME}/dev" 2>/dev/null || true
 
@@ -132,9 +153,11 @@ jobs:
                           aws iam get-role --role-name "ecsTaskRole" --query "Role.Arn" --output text 2>/dev/null || \
                           echo "${EXECUTION_ROLE_ARN}")
 
-          echo "::add-mask::${IMAGE_URI}"
-          echo "::add-mask::${EXECUTION_ROLE_ARN}"
-          echo "::add-mask::${TASK_ROLE_ARN}"
+          [ -n "${IMAGE_URI}" ] && echo "::add-mask::${IMAGE_URI}"
+          [ -n "${EXECUTION_ROLE_ARN}" ] && echo "::add-mask::${EXECUTION_ROLE_ARN}"
+          [ -n "${TASK_ROLE_ARN}" ] && echo "::add-mask::${TASK_ROLE_ARN}"
+
+          echo "Confirmado IMAGE_URI carregada para deploy DEV (tag: ${IMAGE_TAG}): ${IMAGE_URI}"
 
           sed -e "s|__EXECUTION_ROLE_ARN__|${EXECUTION_ROLE_ARN}|g" \
               -e "s|__TASK_ROLE_ARN__|${TASK_ROLE_ARN}|g" \
@@ -144,12 +167,17 @@ jobs:
               -e "s|__GIT_SHA__|${SHORT_SHA}|g" \
               ecs/task-definition.dev.json > /tmp/td-dev.json
 
+          if ! jq -e '.containerDefinitions[0].image | length > 0' /tmp/td-dev.json >/dev/null; then
+            echo "ERRO: containerDefinitions[0].image está vazio em /tmp/td-dev.json!"
+            exit 1
+          fi
+
           TASK_DEF_ARN=$(aws ecs register-task-definition \
             --cli-input-json file:///tmp/td-dev.json \
             --query "taskDefinition.taskDefinitionArn" \
             --output text)
 
-          echo "::add-mask::${TASK_DEF_ARN}"
+          [ -n "${TASK_DEF_ARN}" ] && echo "::add-mask::${TASK_DEF_ARN}"
           echo "task_def_arn=${TASK_DEF_ARN}" >> "$GITHUB_OUTPUT"
 
       - name: Provisionar/Atualizar Cluster e Service no Amazon ECS (DEV) com desired-count = 1
@@ -284,6 +312,22 @@ jobs:
           IMAGE_TAG: ${{ needs.build-and-push-ecr.outputs.image_tag }}
           SHORT_SHA: ${{ needs.build-and-push-ecr.outputs.short_sha }}
         run: |
+          if [ -z "${IMAGE_TAG}" ]; then
+            SHORT_SHA="${GITHUB_SHA::7}"
+            IMAGE_TAG="${GITHUB_REF_NAME}-${SHORT_SHA}"
+          fi
+          if [ -z "${IMAGE_URI}" ]; then
+            REPO_URI=$(aws ecr describe-repositories --repository-names "${ECR_REPOSITORY}" --query "repositories[0].repositoryUri" --output text 2>/dev/null || true)
+            if [ -n "${REPO_URI}" ] && [ "${REPO_URI}" != "None" ]; then
+              IMAGE_URI="${REPO_URI}:${IMAGE_TAG}"
+            fi
+          fi
+
+          if [ -z "$IMAGE_URI" ]; then
+            echo "ERRO: IMAGE_URI está vazia! Abortando registro da Task Definition."
+            exit 1
+          fi
+
           aws logs create-log-group --log-group-name "/ecs/${PROJECT_NAME}/staging" 2>/dev/null || true
 
           EXECUTION_ROLE_ARN=$(aws iam get-role --role-name "${PROJECT_NAME}-staging-ecsTaskExecutionRole" --query "Role.Arn" --output text 2>/dev/null || \
@@ -292,9 +336,11 @@ jobs:
                           aws iam get-role --role-name "ecsTaskRole" --query "Role.Arn" --output text 2>/dev/null || \
                           echo "${EXECUTION_ROLE_ARN}")
 
-          echo "::add-mask::${IMAGE_URI}"
-          echo "::add-mask::${EXECUTION_ROLE_ARN}"
-          echo "::add-mask::${TASK_ROLE_ARN}"
+          [ -n "${IMAGE_URI}" ] && echo "::add-mask::${IMAGE_URI}"
+          [ -n "${EXECUTION_ROLE_ARN}" ] && echo "::add-mask::${EXECUTION_ROLE_ARN}"
+          [ -n "${TASK_ROLE_ARN}" ] && echo "::add-mask::${TASK_ROLE_ARN}"
+
+          echo "Confirmado IMAGE_URI carregada para deploy STAGING (tag: ${IMAGE_TAG}): ${IMAGE_URI}"
 
           sed -e "s|__EXECUTION_ROLE_ARN__|${EXECUTION_ROLE_ARN}|g" \
               -e "s|__TASK_ROLE_ARN__|${TASK_ROLE_ARN}|g" \
@@ -304,12 +350,17 @@ jobs:
               -e "s|__GIT_SHA__|${SHORT_SHA}|g" \
               ecs/task-definition.staging.json > /tmp/td-staging.json
 
+          if ! jq -e '.containerDefinitions[0].image | length > 0' /tmp/td-staging.json >/dev/null; then
+            echo "ERRO: containerDefinitions[0].image está vazio em /tmp/td-staging.json!"
+            exit 1
+          fi
+
           TASK_DEF_ARN=$(aws ecs register-task-definition \
             --cli-input-json file:///tmp/td-staging.json \
             --query "taskDefinition.taskDefinitionArn" \
             --output text)
 
-          echo "::add-mask::${TASK_DEF_ARN}"
+          [ -n "${TASK_DEF_ARN}" ] && echo "::add-mask::${TASK_DEF_ARN}"
           echo "task_def_arn=${TASK_DEF_ARN}" >> "$GITHUB_OUTPUT"
 
       - name: Provisionar/Atualizar Cluster e Service no Amazon ECS (STAGING) com desired-count = 1
@@ -443,6 +494,22 @@ jobs:
           IMAGE_TAG: ${{ needs.build-and-push-ecr.outputs.image_tag }}
           SHORT_SHA: ${{ needs.build-and-push-ecr.outputs.short_sha }}
         run: |
+          if [ -z "${IMAGE_TAG}" ]; then
+            SHORT_SHA="${GITHUB_SHA::7}"
+            IMAGE_TAG="${GITHUB_REF_NAME}-${SHORT_SHA}"
+          fi
+          if [ -z "${IMAGE_URI}" ]; then
+            REPO_URI=$(aws ecr describe-repositories --repository-names "${ECR_REPOSITORY}" --query "repositories[0].repositoryUri" --output text 2>/dev/null || true)
+            if [ -n "${REPO_URI}" ] && [ "${REPO_URI}" != "None" ]; then
+              IMAGE_URI="${REPO_URI}:${IMAGE_TAG}"
+            fi
+          fi
+
+          if [ -z "$IMAGE_URI" ]; then
+            echo "ERRO: IMAGE_URI está vazia! Abortando registro da Task Definition."
+            exit 1
+          fi
+
           aws logs create-log-group --log-group-name "/ecs/${PROJECT_NAME}/prod" 2>/dev/null || true
 
           EXECUTION_ROLE_ARN=$(aws iam get-role --role-name "${PROJECT_NAME}-prod-ecsTaskExecutionRole" --query "Role.Arn" --output text 2>/dev/null || \
@@ -451,9 +518,11 @@ jobs:
                           aws iam get-role --role-name "ecsTaskRole" --query "Role.Arn" --output text 2>/dev/null || \
                           echo "${EXECUTION_ROLE_ARN}")
 
-          echo "::add-mask::${IMAGE_URI}"
-          echo "::add-mask::${EXECUTION_ROLE_ARN}"
-          echo "::add-mask::${TASK_ROLE_ARN}"
+          [ -n "${IMAGE_URI}" ] && echo "::add-mask::${IMAGE_URI}"
+          [ -n "${EXECUTION_ROLE_ARN}" ] && echo "::add-mask::${EXECUTION_ROLE_ARN}"
+          [ -n "${TASK_ROLE_ARN}" ] && echo "::add-mask::${TASK_ROLE_ARN}"
+
+          echo "Confirmado IMAGE_URI carregada para deploy PROD (tag: ${IMAGE_TAG}): ${IMAGE_URI}"
 
           sed -e "s|__EXECUTION_ROLE_ARN__|${EXECUTION_ROLE_ARN}|g" \
               -e "s|__TASK_ROLE_ARN__|${TASK_ROLE_ARN}|g" \
@@ -463,12 +532,17 @@ jobs:
               -e "s|__GIT_SHA__|${SHORT_SHA}|g" \
               ecs/task-definition.prod.json > /tmp/td-prod.json
 
+          if ! jq -e '.containerDefinitions[0].image | length > 0' /tmp/td-prod.json >/dev/null; then
+            echo "ERRO: containerDefinitions[0].image está vazio em /tmp/td-prod.json!"
+            exit 1
+          fi
+
           TASK_DEF_ARN=$(aws ecs register-task-definition \
             --cli-input-json file:///tmp/td-prod.json \
             --query "taskDefinition.taskDefinitionArn" \
             --output text)
 
-          echo "::add-mask::${TASK_DEF_ARN}"
+          [ -n "${TASK_DEF_ARN}" ] && echo "::add-mask::${TASK_DEF_ARN}"
           echo "task_def_arn=${TASK_DEF_ARN}" >> "$GITHUB_OUTPUT"
 
       - name: Provisionar/Atualizar Service Permanente de PRODUÇÃO no Amazon ECS
