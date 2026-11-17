@@ -80,6 +80,7 @@ function criarServidor() {
       const ambiente = process.env.APP_ENV || "local";
       const info = {
         servico: "aws-ecs-ephemeral-environments",
+        mensagem: "Minha alteração 17/11/2026 subiu para Produção com sucesso! 🚀",
         ambiente,
         tipoAmbiente: ambiente === "prod" ? "permanente" : "efemero",
         imagemTag: process.env.IMAGE_TAG || "dev-local",
