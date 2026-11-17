@@ -46,13 +46,18 @@ A separação rigorosa de privilégios garante que **a pipeline**, **o agente de
 
 ---
 
-## Visão Geral do Fluxo (`dev` → `staging` → `prod`)
+## Visão Geral do Fluxo por Branch (`dev` → `staging` → `main`)
 
-1. **Build e Push Imutável para o ECR**: o pipeline (`build-and-push-ecr`) roda os testes unitários da aplicação, autentica com a **Identidade do Pipeline (CI/CD)** usando chaves estáticas, constrói a imagem e faz o push para o Amazon ECR com tag única e imutável (ex.: `app:dev-a1b2c3d`).
-2. **Provisionamento Efêmero em `dev` e `staging`**: o CI/CD registra uma nova revisão da Task Definition (`ecs/task-definition.dev.json` / `ecs/task-definition.staging.json`) apontando para essa tag exata e sobe o Service/Task no Amazon ECS (`desired-count 1`).
-3. **Execução Controlada pelo ECS Agent**: o agente do ECS utiliza a **`ecsTaskExecutionRole`** para baixar a imagem privada do ECR e encaminhar `stdout`/`stderr` do container para o CloudWatch Logs (`/ecs/aws-ecs-ephemeral-environments/dev` e `/ecs/aws-ecs-ephemeral-environments/staging`). Enquanto isso, a aplicação utiliza a **`ecsTaskRole`** caso precise acessar serviços AWS em runtime.
-4. **Testes e Teardown dos Ambientes Efêmeros**: após validar `GET /health`, `GET /info` e os registros de logs no CloudWatch, o pipeline executa o teardown (`if: always()`) encerrando o Service/Task de `dev` e `staging` (`desired-count 0`). **A imagem permanece salva no ECR e os logs permanecem intactos no CloudWatch Logs** (`skip_destroy = true`).
-5. **Promoção Imutável para Produção**: mediante aprovação no GitHub Environment `production`, o pipeline promove **a mesma tag de imagem validada** (`app:dev-a1b2c3d`) para o Service permanente de produção (`aws-ecs-ephemeral-environments-prod-service`), realizando rolling update com zero downtime.
+1. **Push na branch `dev`**:
+   - Executa os testes unitários, faz o build da imagem Docker e envia para o **Amazon ECR** com tag imutável (`app:dev-<short_sha>`).
+   - Registra uma nova revisão da Task Definition (`ecs/task-definition.dev.json`), provisiona/atualiza o Service no Amazon ECS (`desired-count = 1`), executa os smoke tests e **mantém o ambiente `dev` ativo**, gerando o **link público clicável** (`http://<PUBLIC_IP>:3000/info` e `/health`) no resumo do GitHub Actions e no Environment `dev`.
+2. **Push na branch `staging`**:
+   - Publica/reutiliza a imagem imutável no ECR (`app:staging-<short_sha>`), registra a revisão da Task Definition (`ecs/task-definition.staging.json`), sobe o Service de homologação no ECS (`desired-count = 1`) e **mantém o ambiente `staging` ativo**, disponibilizando o **link público clicável** no GitHub Actions.
+3. **Execução Controlada pelo ECS Agent**:
+   - Em todos os ambientes, o agente do ECS utiliza a **`ecsTaskExecutionRole`** para baixar a imagem privada do ECR e encaminhar `stdout`/`stderr` do container para o CloudWatch Logs (`/ecs/aws-ecs-ephemeral-environments/<env>`), enquanto a aplicação utiliza a **`ecsTaskRole`** em tempo de execução.
+4. **Push na branch `main` (Promoção para Produção + Teardown de `dev` e `staging`)**:
+   - Atualiza o Service permanente de produção (`aws-ecs-ephemeral-environments-prod-service`) e gera o **link público de `prod`**.
+   - Em seguida, **desliga automaticamente os ambientes efêmeros de `dev` e `staging` (`desired-count = 0`)**, zerando o custo de computação de testes enquanto **mantém as imagens salvas no ECR e os logs preservados no CloudWatch Logs**.
 
 ---
 

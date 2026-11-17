@@ -1,17 +1,12 @@
-name: Pipeline Multi-Ambiente ECS & ECR (Dev, Staging Efêmeros e Prod Permanente)
+name: Pipeline Multi-Ambiente ECS & ECR (Branches dev, staging e main)
 
 on:
   push:
     branches:
+      - dev
+      - staging
       - main
-      - develop
   workflow_dispatch:
-    inputs:
-      deploy_prod:
-        description: "Confirmar promoção para o ambiente permanente de produção (se aplicável)"
-        required: false
-        default: "false"
-        type: string
 
 permissions:
   contents: read
@@ -23,7 +18,7 @@ env:
 
 jobs:
   # ===========================================================================
-  # JOB 1: Build da Imagem + Push Imutável para o Amazon ECR
+  # JOB 1: Testes Unitários + Build e Push Imutável no Amazon ECR
   # ===========================================================================
   build-and-push-ecr:
     name: "1. Build e Push Imutável no ECR"
@@ -53,51 +48,61 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Garantir existência do repositório imutável no Amazon ECR
+        run: |
+          if ! aws ecr describe-repositories --repository-names "${ECR_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Criando repositório imutável ${ECR_REPOSITORY} no Amazon ECR..."
+            aws ecr create-repository \
+              --repository-name "${ECR_REPOSITORY}" \
+              --image-tag-mutability IMMUTABLE \
+              --image-scanning-configuration scanOnPush=true >/dev/null
+          fi
+
       - name: Login no Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Gerar tag imutável e construir imagem Docker
+      - name: Gerar tag imutável, construir e publicar imagem no ECR
         id: build-info
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
           SHORT_SHA="${GITHUB_SHA::7}"
-          IMAGE_TAG="dev-${SHORT_SHA}"
+          BRANCH_NAME="${GITHUB_REF_NAME}"
+          IMAGE_TAG="${BRANCH_NAME}-${SHORT_SHA}"
           IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
 
           # Mascara o registro ECR e a URI da imagem nos logs públicos do GitHub Actions
           echo "::add-mask::${ECR_REGISTRY}"
           echo "::add-mask::${IMAGE_URI}"
 
-          echo "Gerando artefato imutável com tag: ${IMAGE_TAG}"
-          docker build \
-            --build-arg IMAGE_TAG="${IMAGE_TAG}" \
-            --build-arg GIT_SHA="${SHORT_SHA}" \
-            -t "${IMAGE_URI}" \
-            ./app
+          if aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids imageTag="${IMAGE_TAG}" >/dev/null 2>&1; then
+            echo "A tag imutável ${IMAGE_TAG} já existe no ECR. Reutilizando imagem existente."
+          else
+            echo "Construindo e enviando artefato imutável com tag: ${IMAGE_TAG}"
+            docker build \
+              --build-arg IMAGE_TAG="${IMAGE_TAG}" \
+              --build-arg GIT_SHA="${SHORT_SHA}" \
+              -t "${IMAGE_URI}" \
+              ./app
+            docker push "${IMAGE_URI}"
+          fi
 
           echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
           echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
           echo "image_uri=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
 
-      - name: Enviar imagem com tag única e imutável para o Amazon ECR
-        env:
-          IMAGE_URI: ${{ steps.build-info.outputs.image_uri }}
-          IMAGE_TAG: ${{ steps.build-info.outputs.image_tag }}
-        run: |
-          echo "::add-mask::${IMAGE_URI}"
-          docker push "${IMAGE_URI}"
-          echo "Imagem publicada com sucesso no ECR com a tag: ${IMAGE_TAG}"
-
   # ===========================================================================
-  # JOB 2: Ambiente Efêmero de DEV (Sobe Service/Task -> Testa -> Encerra)
+  # JOB 2: Branch DEV -> Sobe o Ambiente DEV no ECS e Mantém Ativo com Link
   # ===========================================================================
-  ephemeral-dev:
-    name: "2. Ambiente Efêmero DEV (Deploy, Testes e Teardown)"
+  deploy-dev:
+    name: "2. Deploy DEV (Sobe no ECS e Gera Link)"
     needs: [build-and-push-ecr]
+    if: github.ref == 'refs/heads/dev'
     runs-on: ubuntu-latest
-    environment: dev
+    environment:
+      name: dev
+      url: ${{ steps.endpoint.outputs.url }}
 
     steps:
       - name: Checkout do código-fonte
@@ -110,15 +115,22 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Registrar nova revisão da Task Definition (DEV) apontando para a tag imutável
+      - name: Registrar Task Definition (DEV) apontando para a tag imutável
         id: register-td
         env:
           IMAGE_URI: ${{ needs.build-and-push-ecr.outputs.image_uri }}
           IMAGE_TAG: ${{ needs.build-and-push-ecr.outputs.image_tag }}
           SHORT_SHA: ${{ needs.build-and-push-ecr.outputs.short_sha }}
         run: |
-          EXECUTION_ROLE_ARN=$(aws iam get-role --role-name "${PROJECT_NAME}-dev-ecsTaskExecutionRole" --query "Role.Arn" --output text)
-          TASK_ROLE_ARN=$(aws iam get-role --role-name "${PROJECT_NAME}-dev-ecsTaskRole" --query "Role.Arn" --output text)
+          # Garante que o Log Group exista no CloudWatch Logs
+          aws logs create-log-group --log-group-name "/ecs/${PROJECT_NAME}/dev" 2>/dev/null || true
+
+          # Resolve Execution Role e Task Role (suporta padrão com prefixo do projeto ou nome direto)
+          EXECUTION_ROLE_ARN=$(aws iam get-role --role-name "${PROJECT_NAME}-dev-ecsTaskExecutionRole" --query "Role.Arn" --output text 2>/dev/null || \
+                               aws iam get-role --role-name "ecsTaskExecutionRole" --query "Role.Arn" --output text)
+          TASK_ROLE_ARN=$(aws iam get-role --role-name "${PROJECT_NAME}-dev-ecsTaskRole" --query "Role.Arn" --output text 2>/dev/null || \
+                          aws iam get-role --role-name "ecsTaskRole" --query "Role.Arn" --output text 2>/dev/null || \
+                          echo "${EXECUTION_ROLE_ARN}")
 
           echo "::add-mask::${IMAGE_URI}"
           echo "::add-mask::${EXECUTION_ROLE_ARN}"
@@ -138,38 +150,80 @@ jobs:
             --output text)
 
           echo "::add-mask::${TASK_DEF_ARN}"
-          echo "Task Definition registrada para DEV (${IMAGE_TAG})."
           echo "task_def_arn=${TASK_DEF_ARN}" >> "$GITHUB_OUTPUT"
 
-      - name: Subir Service/Task efêmero no Amazon ECS (DEV)
+      - name: Provisionar/Atualizar Cluster e Service no Amazon ECS (DEV) com desired-count = 1
         env:
           TASK_DEF_ARN: ${{ steps.register-td.outputs.task_def_arn }}
         run: |
-          # O ECS Agent usará a ecsTaskExecutionRole para puxar a imagem do ECR
-          # e enviar stdout/stderr do container para /ecs/aws-ecs-ephemeral-environments/dev.
-          # O código da aplicação usará a ecsTaskRole em tempo de execução.
-          aws ecs update-service \
-            --cluster "${PROJECT_NAME}-dev-cluster" \
-            --service "${PROJECT_NAME}-dev-service" \
-            --task-definition "${TASK_DEF_ARN}" \
-            --desired-count 1 \
-            --force-new-deployment
+          CLUSTER_NAME="${PROJECT_NAME}-dev-cluster"
+          SERVICE_NAME="${PROJECT_NAME}-dev-service"
+
+          # Garante que o Cluster exista
+          aws ecs create-cluster \
+            --cluster-name "${CLUSTER_NAME}" \
+            --capacity-providers FARGATE FARGATE_SPOT >/dev/null
+
+          SERVICE_STATUS=$(aws ecs describe-services \
+            --cluster "${CLUSTER_NAME}" \
+            --services "${SERVICE_NAME}" \
+            --query "services[0].status" \
+            --output text 2>/dev/null || echo "NONE")
+
+          if [ "${SERVICE_STATUS}" != "ACTIVE" ]; then
+            echo "Service ${SERVICE_NAME} não encontrado ou inativo. Provisionando automaticamente..."
+            VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query "Vpcs[0].VpcId" --output text)
+            if [ "${VPC_ID}" = "None" ] || [ -z "${VPC_ID}" ]; then
+              VPC_ID=$(aws ec2 describe-vpcs --query "Vpcs[0].VpcId" --output text)
+            fi
+
+            SUBNET_IDS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=${VPC_ID}" --query "Subnets[*].SubnetId" --output text | tr '\t' ',')
+
+            SG_NAME="${PROJECT_NAME}-dev-ecs-tasks-sg"
+            SG_ID=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=${VPC_ID}" "Name=group-name,Values=${SG_NAME}" --query "SecurityGroups[0].GroupId" --output text 2>/dev/null || echo "None")
+            if [ "${SG_ID}" = "None" ] || [ -z "${SG_ID}" ]; then
+              SG_ID=$(aws ec2 create-security-group --group-name "${SG_NAME}" --description "SG para tasks ECS do ambiente dev" --vpc-id "${VPC_ID}" --query "GroupId" --output text)
+              aws ec2 authorize-security-group-ingress --group-id "${SG_ID}" --protocol tcp --port 3000 --cidr 0.0.0.0/0 2>/dev/null || true
+            fi
+
+            aws ecs create-service \
+              --cluster "${CLUSTER_NAME}" \
+              --service-name "${SERVICE_NAME}" \
+              --task-definition "${TASK_DEF_ARN}" \
+              --desired-count 1 \
+              --launch-type FARGATE \
+              --network-configuration "awsvpcConfiguration={subnets=[${SUBNET_IDS}],securityGroups=[${SG_ID}],assignPublicIp=ENABLED}" >/dev/null
+          else
+            echo "Atualizando Service ${SERVICE_NAME} para desired-count = 1..."
+            aws ecs update-service \
+              --cluster "${CLUSTER_NAME}" \
+              --service "${SERVICE_NAME}" \
+              --task-definition "${TASK_DEF_ARN}" \
+              --desired-count 1 \
+              --force-new-deployment >/dev/null
+          fi
 
           aws ecs wait services-stable \
-            --cluster "${PROJECT_NAME}-dev-cluster" \
-            --services "${PROJECT_NAME}-dev-service"
+            --cluster "${CLUSTER_NAME}" \
+            --services "${SERVICE_NAME}"
 
-      - name: Executar testes funcionais no ambiente efêmero DEV e validar CloudWatch Logs
+      - name: Obter Link Público do Ambiente DEV e Validar Saúde
+        id: endpoint
+        env:
+          IMAGE_TAG: ${{ needs.build-and-push-ecr.outputs.image_tag }}
         run: |
+          CLUSTER_NAME="${PROJECT_NAME}-dev-cluster"
+          SERVICE_NAME="${PROJECT_NAME}-dev-service"
+
           TASK_ARN=$(aws ecs list-tasks \
-            --cluster "${PROJECT_NAME}-dev-cluster" \
-            --service-name "${PROJECT_NAME}-dev-service" \
+            --cluster "${CLUSTER_NAME}" \
+            --service-name "${SERVICE_NAME}" \
             --desired-status RUNNING \
             --query "taskArns[0]" \
             --output text)
 
           ENI_ID=$(aws ecs describe-tasks \
-            --cluster "${PROJECT_NAME}-dev-cluster" \
+            --cluster "${CLUSTER_NAME}" \
             --tasks "${TASK_ARN}" \
             --query "tasks[0].attachments[0].details[?name=='networkInterfaceId'].value | [0]" \
             --output text)
@@ -179,40 +233,38 @@ jobs:
             --query "NetworkInterfaces[0].Association.PublicIp" \
             --output text)
 
-          echo "Executando smoke tests em http://${PUBLIC_IP}:3000"
-          curl --fail --silent --show-error "http://${PUBLIC_IP}:3000/health"
-          curl --fail --silent --show-error "http://${PUBLIC_IP}:3000/info"
+          APP_URL="http://${PUBLIC_IP}:3000"
+          echo "url=${APP_URL}" >> "$GITHUB_OUTPUT"
 
-          # Valida persistência de logs enviados pela ecsTaskExecutionRole ao CloudWatch
-          sleep 10
-          aws logs filter-log-events \
-            --log-group-name "/ecs/${PROJECT_NAME}/dev" \
-            --limit 10 \
-            --query "events[*].message"
+          echo "Testando endpoints do ambiente DEV em ${APP_URL}..."
+          for i in 1 2 3 4 5; do
+            if curl --fail --silent --show-error "${APP_URL}/health"; then
+              break
+            fi
+            sleep 5
+          done
+          curl --fail --silent --show-error "${APP_URL}/info"
 
-      - name: "Teardown DEV: encerrar Service/Task preservando imagem no ECR e logs no CloudWatch"
-        if: always()
-        run: |
-          echo "Encerrando tasks do ambiente efêmero DEV (desired-count = 0)..."
-          aws ecs update-service \
-            --cluster "${PROJECT_NAME}-dev-cluster" \
-            --service "${PROJECT_NAME}-dev-service" \
-            --desired-count 0
-
-          aws ecs wait services-stable \
-            --cluster "${PROJECT_NAME}-dev-cluster" \
-            --services "${PROJECT_NAME}-dev-service"
-
-          echo "Service/Task de DEV encerrado. Imagem no ECR e logs no CloudWatch permanecem intactos."
+          {
+            echo "## 🚀 Ambiente DEV Ativo no Amazon ECS"
+            echo "- **Status**: Em execução (\`desired-count = 1\`)"
+            echo "- **Tag da Imagem no ECR**: \`${IMAGE_TAG}\`"
+            echo "- **Link Principal (`/info`)**: [${APP_URL}/info](${APP_URL}/info)"
+            echo "- **Link Healthcheck (`/health`)**: [${APP_URL}/health](${APP_URL}/health)"
+            echo "- **CloudWatch Log Group**: \`/ecs/${PROJECT_NAME}/dev\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ===========================================================================
-  # JOB 3: Ambiente Efêmero de STAGING (Mesma Tag Imutável -> Testa -> Encerra)
+  # JOB 3: Branch STAGING -> Sobe o Ambiente STAGING no ECS e Mantém Ativo com Link
   # ===========================================================================
-  ephemeral-staging:
-    name: "3. Ambiente Efêmero STAGING (Mesma Imagem, Testes e Teardown)"
-    needs: [build-and-push-ecr, ephemeral-dev]
+  deploy-staging:
+    name: "3. Deploy STAGING (Sobe no ECS e Gera Link)"
+    needs: [build-and-push-ecr]
+    if: github.ref == 'refs/heads/staging'
     runs-on: ubuntu-latest
-    environment: staging
+    environment:
+      name: staging
+      url: ${{ steps.endpoint.outputs.url }}
 
     steps:
       - name: Checkout do código-fonte
@@ -225,15 +277,20 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Registrar revisão da Task Definition (STAGING) reutilizando a mesma imagem do ECR
+      - name: Registrar Task Definition (STAGING) apontando para a tag imutável
         id: register-td
         env:
           IMAGE_URI: ${{ needs.build-and-push-ecr.outputs.image_uri }}
           IMAGE_TAG: ${{ needs.build-and-push-ecr.outputs.image_tag }}
           SHORT_SHA: ${{ needs.build-and-push-ecr.outputs.short_sha }}
         run: |
-          EXECUTION_ROLE_ARN=$(aws iam get-role --role-name "${PROJECT_NAME}-staging-ecsTaskExecutionRole" --query "Role.Arn" --output text)
-          TASK_ROLE_ARN=$(aws iam get-role --role-name "${PROJECT_NAME}-staging-ecsTaskRole" --query "Role.Arn" --output text)
+          aws logs create-log-group --log-group-name "/ecs/${PROJECT_NAME}/staging" 2>/dev/null || true
+
+          EXECUTION_ROLE_ARN=$(aws iam get-role --role-name "${PROJECT_NAME}-staging-ecsTaskExecutionRole" --query "Role.Arn" --output text 2>/dev/null || \
+                               aws iam get-role --role-name "ecsTaskExecutionRole" --query "Role.Arn" --output text)
+          TASK_ROLE_ARN=$(aws iam get-role --role-name "${PROJECT_NAME}-staging-ecsTaskRole" --query "Role.Arn" --output text 2>/dev/null || \
+                          aws iam get-role --role-name "ecsTaskRole" --query "Role.Arn" --output text 2>/dev/null || \
+                          echo "${EXECUTION_ROLE_ARN}")
 
           echo "::add-mask::${IMAGE_URI}"
           echo "::add-mask::${EXECUTION_ROLE_ARN}"
@@ -253,35 +310,79 @@ jobs:
             --output text)
 
           echo "::add-mask::${TASK_DEF_ARN}"
-          echo "Task Definition registrada para STAGING (${IMAGE_TAG})."
           echo "task_def_arn=${TASK_DEF_ARN}" >> "$GITHUB_OUTPUT"
 
-      - name: Subir Service/Task efêmero no Amazon ECS (STAGING)
+      - name: Provisionar/Atualizar Cluster e Service no Amazon ECS (STAGING) com desired-count = 1
         env:
           TASK_DEF_ARN: ${{ steps.register-td.outputs.task_def_arn }}
         run: |
-          aws ecs update-service \
-            --cluster "${PROJECT_NAME}-staging-cluster" \
-            --service "${PROJECT_NAME}-staging-service" \
-            --task-definition "${TASK_DEF_ARN}" \
-            --desired-count 1 \
-            --force-new-deployment
+          CLUSTER_NAME="${PROJECT_NAME}-staging-cluster"
+          SERVICE_NAME="${PROJECT_NAME}-staging-service"
+
+          aws ecs create-cluster \
+            --cluster-name "${CLUSTER_NAME}" \
+            --capacity-providers FARGATE FARGATE_SPOT >/dev/null
+
+          SERVICE_STATUS=$(aws ecs describe-services \
+            --cluster "${CLUSTER_NAME}" \
+            --services "${SERVICE_NAME}" \
+            --query "services[0].status" \
+            --output text 2>/dev/null || echo "NONE")
+
+          if [ "${SERVICE_STATUS}" != "ACTIVE" ]; then
+            echo "Service ${SERVICE_NAME} não encontrado ou inativo. Provisionando automaticamente..."
+            VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query "Vpcs[0].VpcId" --output text)
+            if [ "${VPC_ID}" = "None" ] || [ -z "${VPC_ID}" ]; then
+              VPC_ID=$(aws ec2 describe-vpcs --query "Vpcs[0].VpcId" --output text)
+            fi
+
+            SUBNET_IDS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=${VPC_ID}" --query "Subnets[*].SubnetId" --output text | tr '\t' ',')
+
+            SG_NAME="${PROJECT_NAME}-staging-ecs-tasks-sg"
+            SG_ID=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=${VPC_ID}" "Name=group-name,Values=${SG_NAME}" --query "SecurityGroups[0].GroupId" --output text 2>/dev/null || echo "None")
+            if [ "${SG_ID}" = "None" ] || [ -z "${SG_ID}" ]; then
+              SG_ID=$(aws ec2 create-security-group --group-name "${SG_NAME}" --description "SG para tasks ECS do ambiente staging" --vpc-id "${VPC_ID}" --query "GroupId" --output text)
+              aws ec2 authorize-security-group-ingress --group-id "${SG_ID}" --protocol tcp --port 3000 --cidr 0.0.0.0/0 2>/dev/null || true
+            fi
+
+            aws ecs create-service \
+              --cluster "${CLUSTER_NAME}" \
+              --service-name "${SERVICE_NAME}" \
+              --task-definition "${TASK_DEF_ARN}" \
+              --desired-count 1 \
+              --launch-type FARGATE \
+              --network-configuration "awsvpcConfiguration={subnets=[${SUBNET_IDS}],securityGroups=[${SG_ID}],assignPublicIp=ENABLED}" >/dev/null
+          else
+            echo "Atualizando Service ${SERVICE_NAME} para desired-count = 1..."
+            aws ecs update-service \
+              --cluster "${CLUSTER_NAME}" \
+              --service "${SERVICE_NAME}" \
+              --task-definition "${TASK_DEF_ARN}" \
+              --desired-count 1 \
+              --force-new-deployment >/dev/null
+          fi
 
           aws ecs wait services-stable \
-            --cluster "${PROJECT_NAME}-staging-cluster" \
-            --services "${PROJECT_NAME}-staging-service"
+            --cluster "${CLUSTER_NAME}" \
+            --services "${SERVICE_NAME}"
 
-      - name: Executar testes de integração/homologação no ambiente STAGING
+      - name: Obter Link Público do Ambiente STAGING e Validar Saúde
+        id: endpoint
+        env:
+          IMAGE_TAG: ${{ needs.build-and-push-ecr.outputs.image_tag }}
         run: |
+          CLUSTER_NAME="${PROJECT_NAME}-staging-cluster"
+          SERVICE_NAME="${PROJECT_NAME}-staging-service"
+
           TASK_ARN=$(aws ecs list-tasks \
-            --cluster "${PROJECT_NAME}-staging-cluster" \
-            --service-name "${PROJECT_NAME}-staging-service" \
+            --cluster "${CLUSTER_NAME}" \
+            --service-name "${SERVICE_NAME}" \
             --desired-status RUNNING \
             --query "taskArns[0]" \
             --output text)
 
           ENI_ID=$(aws ecs describe-tasks \
-            --cluster "${PROJECT_NAME}-staging-cluster" \
+            --cluster "${CLUSTER_NAME}" \
             --tasks "${TASK_ARN}" \
             --query "tasks[0].attachments[0].details[?name=='networkInterfaceId'].value | [0]" \
             --output text)
@@ -291,40 +392,38 @@ jobs:
             --query "NetworkInterfaces[0].Association.PublicIp" \
             --output text)
 
-          echo "Validando ambiente efêmero STAGING em http://${PUBLIC_IP}:3000"
-          curl --fail --silent --show-error "http://${PUBLIC_IP}:3000/health"
-          curl --fail --silent --show-error "http://${PUBLIC_IP}:3000/info"
+          APP_URL="http://${PUBLIC_IP}:3000"
+          echo "url=${APP_URL}" >> "$GITHUB_OUTPUT"
 
-          sleep 10
-          aws logs filter-log-events \
-            --log-group-name "/ecs/${PROJECT_NAME}/staging" \
-            --limit 10 \
-            --query "events[*].message"
+          echo "Testando endpoints do ambiente STAGING em ${APP_URL}..."
+          for i in 1 2 3 4 5; do
+            if curl --fail --silent --show-error "${APP_URL}/health"; then
+              break
+            fi
+            sleep 5
+          done
+          curl --fail --silent --show-error "${APP_URL}/info"
 
-      - name: "Teardown STAGING: encerrar Service/Task preservando imagem no ECR e logs no CloudWatch"
-        if: always()
-        run: |
-          echo "Encerrando tasks do ambiente efêmero STAGING (desired-count = 0)..."
-          aws ecs update-service \
-            --cluster "${PROJECT_NAME}-staging-cluster" \
-            --service "${PROJECT_NAME}-staging-service" \
-            --desired-count 0
-
-          aws ecs wait services-stable \
-            --cluster "${PROJECT_NAME}-staging-cluster" \
-            --services "${PROJECT_NAME}-staging-service"
-
-          echo "Service/Task de STAGING encerrado. Logs preservados em /ecs/${PROJECT_NAME}/staging."
+          {
+            echo "## 🧪 Ambiente STAGING Ativo no Amazon ECS"
+            echo "- **Status**: Em execução (\`desired-count = 1\`)"
+            echo "- **Tag da Imagem no ECR**: \`${IMAGE_TAG}\`"
+            echo "- **Link Principal (`/info`)**: [${APP_URL}/info](${APP_URL}/info)"
+            echo "- **Link Healthcheck (`/health`)**: [${APP_URL}/health](${APP_URL}/health)"
+            echo "- **CloudWatch Log Group**: \`/ecs/${PROJECT_NAME}/staging\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ===========================================================================
-  # JOB 4: Promoção da Mesma Tag Imutável para o Service Permanente de PRODUÇÃO
+  # JOB 4: Branch MAIN -> Atualiza PRODUÇÃO + Desliga DEV e STAGING (count = 0)
   # ===========================================================================
-  promote-prod:
-    name: "4. Promoção Imutável para PRODUÇÃO (Service Permanente)"
-    needs: [build-and-push-ecr, ephemeral-staging]
+  deploy-prod-and-teardown:
+    name: "4. Deploy PROD + Desligar DEV e STAGING (desired-count = 0)"
+    needs: [build-and-push-ecr]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: production # Exige aprovação manual configurada no GitHub Environments
+    environment:
+      name: production
+      url: ${{ steps.endpoint.outputs.url }}
 
     steps:
       - name: Checkout do código-fonte
@@ -337,15 +436,20 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Registrar Task Definition (PROD) promovendo a exata mesma imagem testada
+      - name: Registrar Task Definition (PROD) apontando para a tag imutável
         id: register-td
         env:
           IMAGE_URI: ${{ needs.build-and-push-ecr.outputs.image_uri }}
           IMAGE_TAG: ${{ needs.build-and-push-ecr.outputs.image_tag }}
           SHORT_SHA: ${{ needs.build-and-push-ecr.outputs.short_sha }}
         run: |
-          EXECUTION_ROLE_ARN=$(aws iam get-role --role-name "${PROJECT_NAME}-prod-ecsTaskExecutionRole" --query "Role.Arn" --output text)
-          TASK_ROLE_ARN=$(aws iam get-role --role-name "${PROJECT_NAME}-prod-ecsTaskRole" --query "Role.Arn" --output text)
+          aws logs create-log-group --log-group-name "/ecs/${PROJECT_NAME}/prod" 2>/dev/null || true
+
+          EXECUTION_ROLE_ARN=$(aws iam get-role --role-name "${PROJECT_NAME}-prod-ecsTaskExecutionRole" --query "Role.Arn" --output text 2>/dev/null || \
+                               aws iam get-role --role-name "ecsTaskExecutionRole" --query "Role.Arn" --output text)
+          TASK_ROLE_ARN=$(aws iam get-role --role-name "${PROJECT_NAME}-prod-ecsTaskRole" --query "Role.Arn" --output text 2>/dev/null || \
+                          aws iam get-role --role-name "ecsTaskRole" --query "Role.Arn" --output text 2>/dev/null || \
+                          echo "${EXECUTION_ROLE_ARN}")
 
           echo "::add-mask::${IMAGE_URI}"
           echo "::add-mask::${EXECUTION_ROLE_ARN}"
@@ -365,27 +469,141 @@ jobs:
             --output text)
 
           echo "::add-mask::${TASK_DEF_ARN}"
-          echo "Nova revisão registrada para PROD (${IMAGE_TAG})."
           echo "task_def_arn=${TASK_DEF_ARN}" >> "$GITHUB_OUTPUT"
 
-      - name: Atualizar Service permanente de PRODUÇÃO com zero-downtime
+      - name: Provisionar/Atualizar Service Permanente de PRODUÇÃO no Amazon ECS
         env:
           TASK_DEF_ARN: ${{ steps.register-td.outputs.task_def_arn }}
-          IMAGE_URI: ${{ needs.build-and-push-ecr.outputs.image_uri }}
-          IMAGE_TAG: ${{ needs.build-and-push-ecr.outputs.image_tag }}
         run: |
-          echo "::add-mask::${IMAGE_URI}"
-          echo "::add-mask::${TASK_DEF_ARN}"
-          echo "Promovendo imagem imutável (${IMAGE_TAG}) para o Service permanente de produção..."
-          aws ecs update-service \
-            --cluster "${PROJECT_NAME}-prod-cluster" \
-            --service "${PROJECT_NAME}-prod-service" \
-            --task-definition "${TASK_DEF_ARN}" \
-            --force-new-deployment
+          CLUSTER_NAME="${PROJECT_NAME}-prod-cluster"
+          SERVICE_NAME="${PROJECT_NAME}-prod-service"
+
+          aws ecs create-cluster \
+            --cluster-name "${CLUSTER_NAME}" \
+            --capacity-providers FARGATE FARGATE_SPOT >/dev/null
+
+          SERVICE_STATUS=$(aws ecs describe-services \
+            --cluster "${CLUSTER_NAME}" \
+            --services "${SERVICE_NAME}" \
+            --query "services[0].status" \
+            --output text 2>/dev/null || echo "NONE")
+
+          if [ "${SERVICE_STATUS}" != "ACTIVE" ]; then
+            echo "Service ${SERVICE_NAME} não encontrado ou inativo. Provisionando automaticamente..."
+            VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query "Vpcs[0].VpcId" --output text)
+            if [ "${VPC_ID}" = "None" ] || [ -z "${VPC_ID}" ]; then
+              VPC_ID=$(aws ec2 describe-vpcs --query "Vpcs[0].VpcId" --output text)
+            fi
+
+            SUBNET_IDS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=${VPC_ID}" --query "Subnets[*].SubnetId" --output text | tr '\t' ',')
+
+            SG_NAME="${PROJECT_NAME}-prod-ecs-tasks-sg"
+            SG_ID=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=${VPC_ID}" "Name=group-name,Values=${SG_NAME}" --query "SecurityGroups[0].GroupId" --output text 2>/dev/null || echo "None")
+            if [ "${SG_ID}" = "None" ] || [ -z "${SG_ID}" ]; then
+              SG_ID=$(aws ec2 create-security-group --group-name "${SG_NAME}" --description "SG para tasks ECS do ambiente prod" --vpc-id "${VPC_ID}" --query "GroupId" --output text)
+              aws ec2 authorize-security-group-ingress --group-id "${SG_ID}" --protocol tcp --port 3000 --cidr 0.0.0.0/0 2>/dev/null || true
+            fi
+
+            aws ecs create-service \
+              --cluster "${CLUSTER_NAME}" \
+              --service-name "${SERVICE_NAME}" \
+              --task-definition "${TASK_DEF_ARN}" \
+              --desired-count 1 \
+              --launch-type FARGATE \
+              --network-configuration "awsvpcConfiguration={subnets=[${SUBNET_IDS}],securityGroups=[${SG_ID}],assignPublicIp=ENABLED}" >/dev/null
+          else
+            echo "Atualizando Service permanente ${SERVICE_NAME}..."
+            aws ecs update-service \
+              --cluster "${CLUSTER_NAME}" \
+              --service "${SERVICE_NAME}" \
+              --task-definition "${TASK_DEF_ARN}" \
+              --desired-count 1 \
+              --force-new-deployment >/dev/null
+          fi
 
           aws ecs wait services-stable \
-            --cluster "${PROJECT_NAME}-prod-cluster" \
-            --services "${PROJECT_NAME}-prod-service"
+            --cluster "${CLUSTER_NAME}" \
+            --services "${SERVICE_NAME}"
 
-          echo "Deploy concluído em produção com sucesso!"
+      - name: Obter Link Público do Ambiente PROD e Validar Saúde
+        id: endpoint
+        env:
+          IMAGE_TAG: ${{ needs.build-and-push-ecr.outputs.image_tag }}
+        run: |
+          CLUSTER_NAME="${PROJECT_NAME}-prod-cluster"
+          SERVICE_NAME="${PROJECT_NAME}-prod-service"
 
+          TASK_ARN=$(aws ecs list-tasks \
+            --cluster "${CLUSTER_NAME}" \
+            --service-name "${SERVICE_NAME}" \
+            --desired-status RUNNING \
+            --query "taskArns[0]" \
+            --output text)
+
+          ENI_ID=$(aws ecs describe-tasks \
+            --cluster "${CLUSTER_NAME}" \
+            --tasks "${TASK_ARN}" \
+            --query "tasks[0].attachments[0].details[?name=='networkInterfaceId'].value | [0]" \
+            --output text)
+
+          PUBLIC_IP=$(aws ec2 describe-network-interfaces \
+            --network-interface-ids "${ENI_ID}" \
+            --query "NetworkInterfaces[0].Association.PublicIp" \
+            --output text)
+
+          APP_URL="http://${PUBLIC_IP}:3000"
+          echo "url=${APP_URL}" >> "$GITHUB_OUTPUT"
+
+          echo "Testando endpoints de PRODUÇÃO em ${APP_URL}..."
+          for i in 1 2 3 4 5; do
+            if curl --fail --silent --show-error "${APP_URL}/health"; then
+              break
+            fi
+            sleep 5
+          done
+          curl --fail --silent --show-error "${APP_URL}/info"
+
+          {
+            echo "## 🟢 Ambiente PRODUÇÃO Ativo no Amazon ECS"
+            echo "- **Status**: Permanente (\`desired-count = 1\`)"
+            echo "- **Tag da Imagem no ECR**: \`${IMAGE_TAG}\`"
+            echo "- **Link Principal (`/info`)**: [${APP_URL}/info](${APP_URL}/info)"
+            echo "- **Link Healthcheck (`/health`)**: [${APP_URL}/health](${APP_URL}/health)"
+            echo "- **CloudWatch Log Group**: \`/ecs/${PROJECT_NAME}/prod\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: "Desligar Ambientes Efêmeros DEV e STAGING (desired-count = 0)"
+        if: always()
+        run: |
+          for ENV_NAME in dev staging; do
+            CLUSTER_NAME="${PROJECT_NAME}-${ENV_NAME}-cluster"
+            SERVICE_NAME="${PROJECT_NAME}-${ENV_NAME}-service"
+
+            SERVICE_STATUS=$(aws ecs describe-services \
+              --cluster "${CLUSTER_NAME}" \
+              --services "${SERVICE_NAME}" \
+              --query "services[0].status" \
+              --output text 2>/dev/null || echo "NONE")
+
+            if [ "${SERVICE_STATUS}" = "ACTIVE" ]; then
+              echo "Desligando ambiente efêmero ${ENV_NAME} (${SERVICE_NAME} -> desired-count = 0)..."
+              aws ecs update-service \
+                --cluster "${CLUSTER_NAME}" \
+                --service "${SERVICE_NAME}" \
+                --desired-count 0 >/dev/null
+
+              aws ecs wait services-stable \
+                --cluster "${CLUSTER_NAME}" \
+                --services "${SERVICE_NAME}"
+              echo "Ambiente ${ENV_NAME} desligado com sucesso."
+            else
+              echo "Service ${SERVICE_NAME} não está ativo no momento; nada para desligar."
+            fi
+          done
+
+          {
+            echo "### 🧹 Teardown dos Ambientes Efêmeros Concluído"
+            echo "- **DEV (\`${PROJECT_NAME}-dev-service\`)**: encerrado (\`desired-count = 0\`)"
+            echo "- **STAGING (\`${PROJECT_NAME}-staging-service\`)**: encerrado (\`desired-count = 0\`)"
+            echo "- **Persistência**: Imagens mantidas no Amazon ECR e logs preservados no CloudWatch Logs."
+          } >> "$GITHUB_STEP_SUMMARY"
