@@ -57,6 +57,8 @@ data "aws_iam_policy_document" "cicd_permissions" {
     sid    = "PushEVerificacaoImagemECR"
     effect = "Allow"
     actions = [
+      "ecr:DescribeRepositories",
+      "ecr:CreateRepository",
       "ecr:BatchCheckLayerAvailability",
       "ecr:CompleteLayerUpload",
       "ecr:InitiateLayerUpload",
@@ -74,6 +76,9 @@ data "aws_iam_policy_document" "cicd_permissions" {
     sid    = "GerenciarCicloDeVidaECS"
     effect = "Allow"
     actions = [
+      "ecs:CreateCluster",
+      "ecs:DescribeClusters",
+      "ecs:PutClusterCapacityProviders",
       "ecs:RegisterTaskDefinition",
       "ecs:DeregisterTaskDefinition",
       "ecs:DescribeTaskDefinition",
@@ -85,16 +90,23 @@ data "aws_iam_policy_document" "cicd_permissions" {
       "ecs:StopTask",
       "ecs:DescribeTasks",
       "ecs:ListTasks",
-      "ecs:DescribeClusters"
+      "ec2:DescribeNetworkInterfaces",
+      "ec2:DescribeVpcs",
+      "ec2:DescribeSubnets",
+      "ec2:DescribeSecurityGroups",
+      "ec2:CreateSecurityGroup",
+      "ec2:AuthorizeSecurityGroupIngress"
     ]
     resources = ["*"]
   }
 
-  # Leitura de logs no CloudWatch durante a validação automatizada dos ambientes efêmeros
+  # Criação e leitura de logs no CloudWatch durante a validação automatizada dos ambientes
   statement {
     sid    = "ConsultarLogsPosTesteCloudWatch"
     effect = "Allow"
     actions = [
+      "logs:CreateLogGroup",
+      "logs:DescribeLogGroups",
       "logs:DescribeLogStreams",
       "logs:GetLogEvents",
       "logs:FilterLogEvents"
@@ -111,7 +123,9 @@ data "aws_iam_policy_document" "cicd_permissions" {
     actions = ["iam:GetRole"]
     resources = [
       "arn:aws:iam::${local.aws_account_id}:role/${var.project_name}-*-ecsTaskExecutionRole",
-      "arn:aws:iam::${local.aws_account_id}:role/${var.project_name}-*-ecsTaskRole"
+      "arn:aws:iam::${local.aws_account_id}:role/${var.project_name}-*-ecsTaskRole",
+      "arn:aws:iam::${local.aws_account_id}:role/ecsTaskExecutionRole",
+      "arn:aws:iam::${local.aws_account_id}:role/ecsTaskRole"
     ]
   }
 
@@ -122,7 +136,9 @@ data "aws_iam_policy_document" "cicd_permissions" {
     actions = ["iam:PassRole"]
     resources = [
       "arn:aws:iam::${local.aws_account_id}:role/${var.project_name}-*-ecsTaskExecutionRole",
-      "arn:aws:iam::${local.aws_account_id}:role/${var.project_name}-*-ecsTaskRole"
+      "arn:aws:iam::${local.aws_account_id}:role/${var.project_name}-*-ecsTaskRole",
+      "arn:aws:iam::${local.aws_account_id}:role/ecsTaskExecutionRole",
+      "arn:aws:iam::${local.aws_account_id}:role/ecsTaskRole"
     ]
 
     condition {

@@ -1,33 +1,38 @@
-# Arquitetura Multi-Ambiente na AWS (Dev, Staging e Prod) com ECS, ECR e IAM
+# Arquitetura Multi-Ambiente na AWS (Preview por PR, Dev, Staging e Prod) com ECS, ECR e IAM
 
-Repositório de portfólio focado em **Cloud Architecture, DevSecOps e FinOps na AWS**, demonstrando como construir um ciclo completo de entrega contínua com **artefatos imutáveis no Amazon ECR**, **ambientes de `dev` e `staging` no Amazon ECS (Fargate)** e **segregação estrita das três identidades IAM**.
+Repositório de portfólio focado em **Cloud Architecture, DevSecOps e FinOps na AWS**, demonstrando como construir um ciclo completo de entrega contínua com **artefatos imutáveis no Amazon ECR**, **ambientes de `preview` isolados por Pull Request**, **ambientes de `dev` e `staging` no Amazon ECS (Fargate)**, **produção permanente** e **segregação estrita das três identidades IAM**.
 
 ---
 
 ## Visão Geral da Arquitetura
 
-Este projeto resolve três desafios clássicos de engenharia de plataforma:
-1. **Imutabilidade de Artefatos ("Build Once, Deploy Anywhere")**: a mesma imagem gerada e testada uma única vez (`app:dev-<short_sha>`) percorre `dev`, `staging` e é promovida para `prod` sem reconstrução (`rebuild`).
-2. **FinOps com Ambientes Efêmeros**: `dev` e `staging` sobem apenas durante a execução do pipeline e são encerrados ao final dos testes (`desired_count = 0` em `FARGATE_SPOT`), evitando custos de computação ociosos.
-3. **Observabilidade e Auditoria Contínuas**: mesmo após o encerramento das tasks/services de `dev` e `staging`, a imagem permanece armazenada no **Amazon ECR** e todo o fluxo de `stdout`/`stderr` permanece salvo no **Amazon CloudWatch Logs**.
+Este projeto resolve quatro desafios clássicos de engenharia de plataforma:
+1. **Imutabilidade de Artefatos ("Build Once, Deploy Anywhere")**: imagens geradas com tag única (`app:pr-<numero>-<short_sha>`, `app:dev-<short_sha>`, `app:staging-<short_sha>`) não são sobrescritas no ECR.
+2. **Trabalho Paralelo em Equipe (Preview por Pull Request)**: cada PR aberto gera seu próprio serviço ECS isolado (`aws-ecs-ephemeral-environments-pr-<numero>-service`) com link público exclusivo comentado automaticamente no PR, permitindo que vários desenvolvedores validem suas features na AWS ao mesmo tempo sem conflito.
+3. **FinOps com Ambientes Efêmeros**: `preview` é destruído ao fechar/mergear o PR, e `dev` e `staging` são desligados (`desired-count = 0`) automaticamente quando a `main` atualiza produção, evitando custos de computação ociosos.
+4. **Observabilidade e Auditoria Contínuas**: mesmo após o encerramento ou remoção dos serviços de `preview`, `dev` e `staging`, as imagens permanecem armazenadas no **Amazon ECR** e todo o fluxo de `stdout`/`stderr` permanece salvo no **Amazon CloudWatch Logs**.
 
 ```mermaid
 flowchart LR
-    DEV["Desenvolvedor (Git Push)"] -->|"Dispara Workflow"| CICD["Pipeline CI/CD (GitHub Actions)"]
-    CICD -->|"1. Push tag imutável (ex: app:dev-a1b2c3d)"| ECR["Amazon ECR (IMMUTABLE)"]
-    CICD -->|"2. Registra Task Definition e sobe/encerra Service"| ECS_DEV["Amazon ECS - DEV (Efêmero)"]
-    CICD -->|"2b. Reutiliza mesma tag e sobe/encerra Service"| ECS_STG["Amazon ECS - STAGING (Efêmero)"]
-    CICD -->|"5. Se aprovado, promove mesma tag"| ECS_PROD["Amazon ECS - PROD (Permanente)"]
+    DEV["Desenvolvedor (Git Push / PR)"] -->|"PR Aberto/Atualizado"| CICD["Pipeline CI/CD (GitHub Actions)"]
+    CICD -->|"0. Push tag pr-N-sha"| ECR["Amazon ECR (IMMUTABLE)"]
+    CICD -->|"0b. Sobe serviço isolado por PR (remove ao fechar)"| ECS_PR["Amazon ECS - PREVIEW (pr-N)"]
+    CICD -->|"1. Push em dev -> Sobe DEV"| ECS_DEV["Amazon ECS - DEV"]
+    CICD -->|"2. Push em staging -> Sobe STAGING"| ECS_STG["Amazon ECS - STAGING"]
+    CICD -->|"3. Push na main -> Atualiza PROD e desliga DEV/STAGING"| ECS_PROD["Amazon ECS - PROD (Permanente)"]
 
-    ECS_DEV -->|"3. Pull da imagem via ecsTaskExecutionRole"| ECR
-    ECS_STG -->|"3. Pull da imagem via ecsTaskExecutionRole"| ECR
-    ECS_PROD -->|"Pull da imagem via ecsTaskExecutionRole"| ECR
+    ECS_PR -->|"Pull via ecsTaskExecutionRole"| ECR
+    ECS_DEV -->|"Pull via ecsTaskExecutionRole"| ECR
+    ECS_STG -->|"Pull via ecsTaskExecutionRole"| ECR
+    ECS_PROD -->|"Pull via ecsTaskExecutionRole"| ECR
 
-    ECS_DEV -->|"3. Logs stdout/stderr (persistentes após teardown)"| CW["Amazon CloudWatch Logs"]
-    ECS_STG -->|"3. Logs stdout/stderr (persistentes após teardown)"| CW
-    ECS_PROD -->|"Logs stdout/stderr contínuos"| CW
+    ECS_PR -->|"Logs stdout/stderr (/preview)"| CW["Amazon CloudWatch Logs"]
+    ECS_DEV -->|"Logs stdout/stderr (/dev)"| CW
+    ECS_STG -->|"Logs stdout/stderr (/staging)"| CW
+    ECS_PROD -->|"Logs stdout/stderr (/prod)"| CW
 
-    ECS_DEV -.->|"Runtime AWS via ecsTaskRole"| APP_AWS["AWS SSM Parameter Store / S3"]
+    ECS_PR -.->|"Runtime AWS via ecsTaskRole"| APP_AWS["AWS SSM Parameter Store / S3"]
+    ECS_DEV -.->|"Runtime AWS via ecsTaskRole"| APP_AWS
     ECS_STG -.->|"Runtime AWS via ecsTaskRole"| APP_AWS
     ECS_PROD -.->|"Runtime AWS via ecsTaskRole"| APP_AWS
 ```
@@ -46,13 +51,22 @@ A separação rigorosa de privilégios garante que **a pipeline**, **o agente de
 
 ---
 
-## Visão Geral do Fluxo (`dev` → `staging` → `prod`)
+## Visão Geral do Fluxo (`Preview por PR` → `dev` → `staging` → `main`)
 
-1. **Build e Push Imutável para o ECR**: o pipeline (`build-and-push-ecr`) roda os testes unitários da aplicação, autentica com a **Identidade do Pipeline (CI/CD)** usando chaves estáticas, constrói a imagem e faz o push para o Amazon ECR com tag única e imutável (ex.: `app:dev-a1b2c3d`).
-2. **Provisionamento Efêmero em `dev` e `staging`**: o CI/CD registra uma nova revisão da Task Definition (`ecs/task-definition.dev.json` / `ecs/task-definition.staging.json`) apontando para essa tag exata e sobe o Service/Task no Amazon ECS (`desired-count 1`).
-3. **Execução Controlada pelo ECS Agent**: o agente do ECS utiliza a **`ecsTaskExecutionRole`** para baixar a imagem privada do ECR e encaminhar `stdout`/`stderr` do container para o CloudWatch Logs (`/ecs/aws-ecs-ephemeral-environments/dev` e `/ecs/aws-ecs-ephemeral-environments/staging`). Enquanto isso, a aplicação utiliza a **`ecsTaskRole`** caso precise acessar serviços AWS em runtime.
-4. **Testes e Teardown dos Ambientes Efêmeros**: após validar `GET /health`, `GET /info` e os registros de logs no CloudWatch, o pipeline executa o teardown (`if: always()`) encerrando o Service/Task de `dev` e `staging` (`desired-count 0`). **A imagem permanece salva no ECR e os logs permanecem intactos no CloudWatch Logs** (`skip_destroy = true`).
-5. **Promoção Imutável para Produção**: mediante aprovação no GitHub Environment `production`, o pipeline promove **a mesma tag de imagem validada** (`app:dev-a1b2c3d`) para o Service permanente de produção (`aws-ecs-ephemeral-environments-prod-service`), realizando rolling update com zero downtime.
+1. **Pull Request Aberto ou Atualizado (`preview`)**:
+   - Quando um desenvolvedor abre ou atualiza um PR para `dev`, `staging` ou `main`, o job `deploy-preview` gera a imagem imutável `app:pr-<numero>-<short_sha>` no **Amazon ECR**, registra uma Task Definition dedicada ([ecs/task-definition.preview.json](ecs/task-definition.preview.json)) e cria um serviço ECS exclusivo (`aws-ecs-ephemeral-environments-pr-<numero>-service`) no cluster `aws-ecs-ephemeral-environments-preview-cluster`.
+   - Após validar `/health` e `/info`, o pipeline publica o **link público próprio daquele PR** no Environment `preview` e **comenta a URL diretamente no Pull Request**, permitindo testes paralelos sem conflito entre membros do time.
+   - Assim que o PR é fechado ou mergeado, o job `cleanup-preview` escala o serviço para `desired-count = 0` e executa `aws ecs delete-service`, preservando a imagem no ECR e os logs em `/ecs/aws-ecs-ephemeral-environments/preview`.
+2. **Push na branch `dev`**:
+   - Executa os testes unitários, faz o build da imagem Docker e envia para o **Amazon ECR** com tag imutável (`app:dev-<short_sha>`).
+   - Registra uma nova revisão da Task Definition (`ecs/task-definition.dev.json`), provisiona/atualiza o Service no Amazon ECS (`desired-count = 1`), executa os smoke tests e **mantém o ambiente `dev` ativo**, gerando o **link público clicável** (`http://<PUBLIC_IP>:3000/info` e `/health`) no resumo do GitHub Actions e no Environment `dev`.
+3. **Push na branch `staging`**:
+   - Publica/reutiliza a imagem imutável no ECR (`app:staging-<short_sha>`), registra a revisão da Task Definition (`ecs/task-definition.staging.json`), sobe o Service de homologação no ECS (`desired-count = 1`) e **mantém o ambiente `staging` ativo**, disponibilizando o **link público clicável** no GitHub Actions.
+4. **Execução Controlada pelo ECS Agent**:
+   - Em todos os ambientes (`preview`, `dev`, `staging` e `prod`), o agente do ECS utiliza a **`ecsTaskExecutionRole`** para baixar a imagem privada do ECR e encaminhar `stdout`/`stderr` do container para o CloudWatch Logs (`/ecs/aws-ecs-ephemeral-environments/<env>`), enquanto a aplicação utiliza a **`ecsTaskRole`** em tempo de execução.
+5. **Push na branch `main` (Promoção para Produção + Teardown de `dev` e `staging`)**:
+   - Atualiza o Service permanente de produção (`aws-ecs-ephemeral-environments-prod-service`) e gera o **link público de `prod`**.
+   - Em seguida, **desliga automaticamente os ambientes efêmeros de `dev` e `staging` (`desired-count = 0`)**, zerando o custo de computação de testes enquanto **mantém as imagens salvas no ECR e os logs preservados no CloudWatch Logs**.
 
 ---
 
@@ -62,7 +76,7 @@ A separação rigorosa de privilégios garante que **a pipeline**, **o agente de
 .
 ├── .github/
 │   └── workflows/
-│       └── pipeline-cicd.yml          # Pipeline completo: Build/ECR -> DEV efêmero -> STAGING efêmero -> PROD
+│       └── pipeline-cicd.yml          # Pipeline completo: Preview por PR + DEV -> STAGING -> PROD + Teardown
 ├── app/
 │   ├── Dockerfile                     # Build multi-stage seguro (node:20-alpine, usuário não-root, HEALTHCHECK)
 │   ├── package.json                   # Metadados e script de testes nativo (node --test)
@@ -72,6 +86,7 @@ A separação rigorosa de privilégios garante que **a pipeline**, **o agente de
 │   ├── arquitetura-iam-ecs.md         # Detalhamento das 3 IAM Roles e diagrama de sequência
 │   └── fluxo-cicd-ambientes-efemeros.md # Ciclo de vida efêmero, FinOps e imutabilidade no ECR
 ├── ecs/
+│   ├── task-definition.preview.json   # Template Task Definition dinâmico para Preview por PR
 │   ├── task-definition.dev.json       # Template Task Definition de DEV
 │   ├── task-definition.staging.json   # Template Task Definition de STAGING
 │   └── task-definition.prod.json      # Template Task Definition de PROD
