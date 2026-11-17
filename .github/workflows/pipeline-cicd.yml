@@ -1,7 +1,13 @@
-name: Pipeline Multi-Ambiente ECS & ECR (Branches dev, staging e main)
+name: Pipeline Multi-Ambiente ECS & ECR (Preview por PR + dev, staging e main)
 
 on:
   push:
+    branches:
+      - dev
+      - staging
+      - main
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
     branches:
       - dev
       - staging
@@ -10,6 +16,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 env:
   AWS_REGION: us-east-2
@@ -22,6 +29,7 @@ jobs:
   # ===========================================================================
   build-and-push-ecr:
     name: "1. Build e Push Imutável no ECR"
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
     runs-on: ubuntu-latest
     outputs:
       image_uri: ${{ steps.build-info.outputs.image_uri }}
@@ -70,8 +78,12 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
           SHORT_SHA="${GITHUB_SHA::7}"
-          BRANCH_NAME="${GITHUB_REF_NAME}"
-          IMAGE_TAG="${BRANCH_NAME}-${SHORT_SHA}"
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            IMAGE_TAG="pr-${{ github.event.pull_request.number }}-${SHORT_SHA}"
+          else
+            BRANCH_NAME="${GITHUB_REF_NAME}"
+            IMAGE_TAG="${BRANCH_NAME}-${SHORT_SHA}"
+          fi
           IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
 
           if [ -z "${IMAGE_URI}" ] || [ -z "${ECR_REGISTRY}" ]; then
@@ -680,4 +692,256 @@ jobs:
             echo "- **DEV (\`${PROJECT_NAME}-dev-service\`)**: encerrado (\`desired-count = 0\`)"
             echo "- **STAGING (\`${PROJECT_NAME}-staging-service\`)**: encerrado (\`desired-count = 0\`)"
             echo "- **Persistência**: Imagens mantidas no Amazon ECR e logs preservados no CloudWatch Logs."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ===========================================================================
+  # JOB 5: Pull Request Aberto/Atualizado -> Sobe Preview Isolado por PR
+  # ===========================================================================
+  deploy-preview:
+    name: "5. Preview Isolado (PR #${{ github.event.pull_request.number }})"
+    needs: [build-and-push-ecr]
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: preview-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    environment:
+      name: preview
+      url: ${{ steps.endpoint.outputs.url }}
+
+    steps:
+      - name: Checkout do código-fonte
+        uses: actions/checkout@v4
+
+      - name: Configurar Identidade do Pipeline (CI/CD) com chaves estáticas
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Registrar Task Definition (PREVIEW) isolada para o PR
+        id: register-td
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          IMAGE_URI: ${{ needs.build-and-push-ecr.outputs.image_uri }}
+          IMAGE_TAG: ${{ needs.build-and-push-ecr.outputs.image_tag }}
+          SHORT_SHA: ${{ needs.build-and-push-ecr.outputs.short_sha }}
+        run: |
+          if [ -z "${IMAGE_TAG}" ]; then
+            SHORT_SHA="${GITHUB_SHA::7}"
+            IMAGE_TAG="pr-${PR_NUMBER}-${SHORT_SHA}"
+          fi
+          if [ -z "${IMAGE_URI}" ]; then
+            REPO_URI=$(aws ecr describe-repositories --repository-names "${ECR_REPOSITORY}" --query "repositories[0].repositoryUri" --output text 2>/dev/null || true)
+            if [ -n "${REPO_URI}" ] && [ "${REPO_URI}" != "None" ]; then
+              IMAGE_URI="${REPO_URI}:${IMAGE_TAG}"
+            fi
+          fi
+
+          if [ -z "$IMAGE_URI" ]; then
+            echo "ERRO: IMAGE_URI está vazia! Abortando registro da Task Definition."
+            exit 1
+          fi
+
+          aws logs create-log-group --log-group-name "/ecs/${PROJECT_NAME}/preview" 2>/dev/null || true
+
+          EXECUTION_ROLE_ARN=$(aws iam get-role --role-name "${PROJECT_NAME}-preview-ecsTaskExecutionRole" --query "Role.Arn" --output text 2>/dev/null || \
+                               aws iam get-role --role-name "${PROJECT_NAME}-dev-ecsTaskExecutionRole" --query "Role.Arn" --output text 2>/dev/null || \
+                               aws iam get-role --role-name "ecsTaskExecutionRole" --query "Role.Arn" --output text)
+          TASK_ROLE_ARN=$(aws iam get-role --role-name "${PROJECT_NAME}-preview-ecsTaskRole" --query "Role.Arn" --output text 2>/dev/null || \
+                          aws iam get-role --role-name "${PROJECT_NAME}-dev-ecsTaskRole" --query "Role.Arn" --output text 2>/dev/null || \
+                          aws iam get-role --role-name "ecsTaskRole" --query "Role.Arn" --output text 2>/dev/null || \
+                          echo "${EXECUTION_ROLE_ARN}")
+
+          [ -n "${IMAGE_URI}" ] && echo "::add-mask::${IMAGE_URI}"
+          [ -n "${EXECUTION_ROLE_ARN}" ] && echo "::add-mask::${EXECUTION_ROLE_ARN}"
+          [ -n "${TASK_ROLE_ARN}" ] && echo "::add-mask::${TASK_ROLE_ARN}"
+
+          echo "Confirmado IMAGE_URI carregada para PREVIEW PR #${PR_NUMBER} (tag: ${IMAGE_TAG}): ${IMAGE_URI}"
+
+          sed -e "s|__PR_NUMBER__|${PR_NUMBER}|g" \
+              -e "s|__EXECUTION_ROLE_ARN__|${EXECUTION_ROLE_ARN}|g" \
+              -e "s|__TASK_ROLE_ARN__|${TASK_ROLE_ARN}|g" \
+              -e "s|__AWS_REGION__|${AWS_REGION}|g" \
+              -e "s|__ECR_IMAGE_URI__|${IMAGE_URI}|g" \
+              -e "s|__IMAGE_TAG__|${IMAGE_TAG}|g" \
+              -e "s|__GIT_SHA__|${SHORT_SHA}|g" \
+              ecs/task-definition.preview.json > "/tmp/td-pr-${PR_NUMBER}.json"
+
+          if ! jq -e '.containerDefinitions[0].image | length > 0' "/tmp/td-pr-${PR_NUMBER}.json" >/dev/null; then
+            echo "ERRO: containerDefinitions[0].image está vazio em /tmp/td-pr-${PR_NUMBER}.json!"
+            exit 1
+          fi
+
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json "file:///tmp/td-pr-${PR_NUMBER}.json" \
+            --query "taskDefinition.taskDefinitionArn" \
+            --output text)
+
+          [ -n "${TASK_DEF_ARN}" ] && echo "::add-mask::${TASK_DEF_ARN}"
+          echo "task_def_arn=${TASK_DEF_ARN}" >> "$GITHUB_OUTPUT"
+
+      - name: Provisionar/Atualizar Service Temporário do PR no Amazon ECS
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          TASK_DEF_ARN: ${{ steps.register-td.outputs.task_def_arn }}
+        run: |
+          CLUSTER_NAME="${PROJECT_NAME}-preview-cluster"
+          SERVICE_NAME="${PROJECT_NAME}-pr-${PR_NUMBER}-service"
+
+          aws ecs create-cluster \
+            --cluster-name "${CLUSTER_NAME}" \
+            --capacity-providers FARGATE FARGATE_SPOT >/dev/null
+
+          SERVICE_STATUS=$(aws ecs describe-services \
+            --cluster "${CLUSTER_NAME}" \
+            --services "${SERVICE_NAME}" \
+            --query "services[0].status" \
+            --output text 2>/dev/null || echo "NONE")
+
+          if [ "${SERVICE_STATUS}" != "ACTIVE" ]; then
+            echo "Criando serviço temporário ${SERVICE_NAME} para o PR #${PR_NUMBER}..."
+            VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query "Vpcs[0].VpcId" --output text)
+            if [ "${VPC_ID}" = "None" ] || [ -z "${VPC_ID}" ]; then
+              VPC_ID=$(aws ec2 describe-vpcs --query "Vpcs[0].VpcId" --output text)
+            fi
+
+            SUBNET_IDS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=${VPC_ID}" --query "Subnets[*].SubnetId" --output text | tr '\t' ',')
+
+            SG_NAME="${PROJECT_NAME}-preview-ecs-tasks-sg"
+            SG_ID=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=${VPC_ID}" "Name=group-name,Values=${SG_NAME}" --query "SecurityGroups[0].GroupId" --output text 2>/dev/null || echo "None")
+            if [ "${SG_ID}" = "None" ] || [ -z "${SG_ID}" ]; then
+              SG_ID=$(aws ec2 create-security-group --group-name "${SG_NAME}" --description "SG para tasks ECS de preview por PR" --vpc-id "${VPC_ID}" --query "GroupId" --output text)
+              aws ec2 authorize-security-group-ingress --group-id "${SG_ID}" --protocol tcp --port 3000 --cidr 0.0.0.0/0 2>/dev/null || true
+            fi
+
+            aws ecs create-service \
+              --cluster "${CLUSTER_NAME}" \
+              --service-name "${SERVICE_NAME}" \
+              --task-definition "${TASK_DEF_ARN}" \
+              --desired-count 1 \
+              --launch-type FARGATE \
+              --network-configuration "awsvpcConfiguration={subnets=[${SUBNET_IDS}],securityGroups=[${SG_ID}],assignPublicIp=ENABLED}" >/dev/null
+          else
+            echo "Atualizando serviço temporário ${SERVICE_NAME} do PR #${PR_NUMBER}..."
+            aws ecs update-service \
+              --cluster "${CLUSTER_NAME}" \
+              --service "${SERVICE_NAME}" \
+              --task-definition "${TASK_DEF_ARN}" \
+              --desired-count 1 \
+              --force-new-deployment >/dev/null
+          fi
+
+          aws ecs wait services-stable \
+            --cluster "${CLUSTER_NAME}" \
+            --services "${SERVICE_NAME}"
+
+      - name: Obter Link Público do Preview do PR e Validar Saúde
+        id: endpoint
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          IMAGE_TAG: ${{ needs.build-and-push-ecr.outputs.image_tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CLUSTER_NAME="${PROJECT_NAME}-preview-cluster"
+          SERVICE_NAME="${PROJECT_NAME}-pr-${PR_NUMBER}-service"
+
+          TASK_ARN=$(aws ecs list-tasks \
+            --cluster "${CLUSTER_NAME}" \
+            --service-name "${SERVICE_NAME}" \
+            --desired-status RUNNING \
+            --query "taskArns[0]" \
+            --output text)
+
+          ENI_ID=$(aws ecs describe-tasks \
+            --cluster "${CLUSTER_NAME}" \
+            --tasks "${TASK_ARN}" \
+            --query "tasks[0].attachments[0].details[?name=='networkInterfaceId'].value | [0]" \
+            --output text)
+
+          PUBLIC_IP=$(aws ec2 describe-network-interfaces \
+            --network-interface-ids "${ENI_ID}" \
+            --query "NetworkInterfaces[0].Association.PublicIp" \
+            --output text)
+
+          APP_URL="http://${PUBLIC_IP}:3000"
+          echo "url=${APP_URL}" >> "$GITHUB_OUTPUT"
+
+          echo "Testando endpoints do Preview PR #${PR_NUMBER} em ${APP_URL}..."
+          for i in 1 2 3 4 5; do
+            if curl --fail --silent --show-error "${APP_URL}/health"; then
+              break
+            fi
+            sleep 5
+          done
+          curl --fail --silent --show-error "${APP_URL}/info"
+
+          {
+            echo "## 👀 Preview Temporário do PR #${PR_NUMBER} Ativo no Amazon ECS"
+            echo "- **Serviço Isolado**: \`${SERVICE_NAME}\`"
+            echo "- **Tag da Imagem no ECR**: \`${IMAGE_TAG}\`"
+            echo "- **Link Principal (`/info`)**: [${APP_URL}/info](${APP_URL}/info)"
+            echo "- **Link Healthcheck (`/health`)**: [${APP_URL}/health](${APP_URL}/health)"
+            echo "- **CloudWatch Log Group**: \`/ecs/${PROJECT_NAME}/preview\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          gh pr comment "${PR_NUMBER}" --body "👀 **Preview temporário ativo para o PR #${PR_NUMBER}**
+          - **Serviço ECS**: \`${SERVICE_NAME}\`
+          - **Tag ECR**: \`${IMAGE_TAG}\`
+          - **Link `/info`**: ${APP_URL}/info
+          - **Link `/health`**: ${APP_URL}/health" || true
+
+  # ===========================================================================
+  # JOB 6: Pull Request Fechado/Mergeado -> Remove o Serviço Temporário do PR
+  # ===========================================================================
+  cleanup-preview:
+    name: "6. Remover Preview (PR #${{ github.event.pull_request.number }} Fechado)"
+    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    environment: preview
+
+    steps:
+      - name: Configurar Identidade do Pipeline (CI/CD) com chaves estáticas
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Encerrar e Deletar Service Temporário do PR #${{ github.event.pull_request.number }}
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          CLUSTER_NAME="${PROJECT_NAME}-preview-cluster"
+          SERVICE_NAME="${PROJECT_NAME}-pr-${PR_NUMBER}-service"
+
+          SERVICE_STATUS=$(aws ecs describe-services \
+            --cluster "${CLUSTER_NAME}" \
+            --services "${SERVICE_NAME}" \
+            --query "services[0].status" \
+            --output text 2>/dev/null || echo "NONE")
+
+          if [ "${SERVICE_STATUS}" = "ACTIVE" ]; then
+            echo "Encerrando tasks e removendo serviço temporário ${SERVICE_NAME}..."
+            aws ecs update-service \
+              --cluster "${CLUSTER_NAME}" \
+              --service "${SERVICE_NAME}" \
+              --desired-count 0 >/dev/null
+            aws ecs wait services-stable \
+              --cluster "${CLUSTER_NAME}" \
+              --services "${SERVICE_NAME}"
+            aws ecs delete-service \
+              --cluster "${CLUSTER_NAME}" \
+              --service "${SERVICE_NAME}" \
+              --force >/dev/null
+            echo "Serviço temporário ${SERVICE_NAME} removido com sucesso."
+          else
+            echo "Serviço ${SERVICE_NAME} já não está ativo."
+          fi
+
+          {
+            echo "## 🧹 Preview do PR #${PR_NUMBER} Removido"
+            echo "- **Serviço deletado**: \`${SERVICE_NAME}\`"
+            echo "- **Persistência**: Imagem mantida no ECR e logs preservados em \`/ecs/${PROJECT_NAME}/preview\`."
           } >> "$GITHUB_STEP_SUMMARY"
