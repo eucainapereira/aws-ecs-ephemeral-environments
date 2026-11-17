@@ -700,7 +700,7 @@ jobs:
   deploy-preview:
     name: "5. Preview Isolado (PR #${{ github.event.pull_request.number }})"
     needs: [build-and-push-ecr]
-    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.head_ref != 'staging'
     runs-on: ubuntu-latest
     concurrency:
       group: preview-pr-${{ github.event.pull_request.number }}
@@ -897,7 +897,7 @@ jobs:
   # ===========================================================================
   cleanup-preview:
     name: "6. Remover Preview (PR #${{ github.event.pull_request.number }} Fechado)"
-    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.head_ref != 'staging'
     runs-on: ubuntu-latest
     environment: preview
 

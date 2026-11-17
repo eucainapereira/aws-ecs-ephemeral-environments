@@ -54,9 +54,10 @@ A separação rigorosa de privilégios garante que **a pipeline**, **o agente de
 ## Visão Geral do Fluxo (`Preview por PR` → `dev` → `staging` → `main`)
 
 1. **Pull Request Aberto ou Atualizado (`preview`)**:
-   - Quando um desenvolvedor abre ou atualiza um PR para `dev`, `staging` ou `main`, o job `deploy-preview` gera a imagem imutável `app:pr-<numero>-<short_sha>` no **Amazon ECR**, registra uma Task Definition dedicada ([ecs/task-definition.preview.json](ecs/task-definition.preview.json)) e cria um serviço ECS exclusivo (`aws-ecs-ephemeral-environments-pr-<numero>-service`) no cluster `aws-ecs-ephemeral-environments-preview-cluster`.
+   - Quando um desenvolvedor abre ou atualiza um PR para `dev`, `staging` ou `main` (exceto PRs de promoção originados de `staging` para `main`, que já foram homologados), o job `deploy-preview` gera a imagem imutável `app:pr-<numero>-<short_sha>` no **Amazon ECR**, registra uma Task Definition dedicada ([ecs/task-definition.preview.json](ecs/task-definition.preview.json)) e cria um serviço ECS exclusivo (`aws-ecs-ephemeral-environments-pr-<numero>-service`) no cluster `aws-ecs-ephemeral-environments-preview-cluster`.
    - Após validar `/health` e `/info`, o pipeline publica o **link público próprio daquele PR** no Environment `preview` e **comenta a URL diretamente no Pull Request**, permitindo testes paralelos sem conflito entre membros do time.
    - Assim que o PR é fechado ou mergeado, o job `cleanup-preview` escala o serviço para `desired-count = 0` e executa `aws ecs delete-service`, preservando a imagem no ECR e os logs em `/ecs/aws-ecs-ephemeral-environments/preview`.
+   - **Regra FinOps de Release**: PRs de `staging ➔ main` não geram preview duplicado, executando apenas testes automatizados e validações de integridade antes da promoção para produção.
 2. **Push na branch `dev`**:
    - Executa os testes unitários, faz o build da imagem Docker e envia para o **Amazon ECR** com tag imutável (`app:dev-<short_sha>`).
    - Registra uma nova revisão da Task Definition (`ecs/task-definition.dev.json`), provisiona/atualiza o Service no Amazon ECS (`desired-count = 1`), executa os smoke tests e **mantém o ambiente `dev` ativo**, gerando o **link público clicável** (`http://<PUBLIC_IP>:3000/info` e `/health`) no resumo do GitHub Actions e no Environment `dev`.
