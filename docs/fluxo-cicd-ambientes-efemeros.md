@@ -4,33 +4,31 @@ Este documento detalha o ciclo de vida das entregas entre **dev**, **staging** e
 
 ---
 
-## Ciclo de Vida da Imagem Imutável
+## Ciclo de Vida por Branch (`dev`, `staging` e `main`)
 
 ```mermaid
 flowchart TD
-    A["1. Build + Testes Unitários"] --> B["2. Push no ECR: app:dev-a1b2c3d (IMMUTABLE)"]
-    B --> C["3. Sobe Task/Service Efêmero em DEV"]
-    C --> D["4. Smoke Tests + Verificação de Logs no CloudWatch"]
-    D --> E["5. Teardown DEV: desired_count = 0"]
-    E --> F["6. Sobe Task/Service Efêmero em STAGING com a MESMA tag"]
-    F --> G["7. Testes de Homologação + Logs no CloudWatch"]
-    G --> H["8. Teardown STAGING: desired_count = 0"]
-    H --> I{"9. Aprovação para Produção?"}
-    I -->|"Sim"| J["10. Rolling Update no Service Permanente de PROD com app:dev-a1b2c3d"]
-    I -->|"Não"| K["Fim do Fluxo (Imagem e Logs preservados para auditoria)"]
+    A["Push na branch dev"] --> B["Build + Push no ECR (IMMUTABLE) + Sobe ECS DEV (desired_count = 1)"]
+    B --> C["Ambiente DEV fica ativo com Link Público (http://IP:3000)"]
+    C --> D["Push/Merge na branch staging"]
+    D --> E["Push no ECR + Sobe ECS STAGING (desired_count = 1)"]
+    E --> F["Ambiente STAGING fica ativo com Link Público (http://IP:3000)"]
+    F --> G["Push/Merge na branch main"]
+    G --> H["Atualiza Service Permanente de PROD + Gera Link Público de PROD"]
+    H --> I["Teardown Automático: Desliga DEV e STAGING (desired_count = 0)"]
+    I --> J["Imagens permanecem no ECR e Logs permanecem no CloudWatch Logs"]
 ```
 
 ---
 
 ## Comparativo entre Ambientes Efêmeros e Permanente
 
-| Característica | `dev` (Efêmero) | `staging` (Efêmero) | `prod` (Permanente) |
+| Característica | `dev` (Branch `dev`) | `staging` (Branch `staging`) | `prod` (Branch `main`) |
 | :--- | :--- | :--- | :--- |
-| **Capacity Provider** | `FARGATE_SPOT` | `FARGATE_SPOT` | `FARGATE` |
-| **Estado Fora da Janela de Pipeline** | `desired_count = 0` (sem tasks em execução) | `desired_count = 0` (sem tasks em execução) | `desired_count = 2` (alta disponibilidade contínua) |
-| **Tag da Imagem Utilizada** | `app:dev-<short_sha>` | Exata mesma `app:dev-<short_sha>` | Exata mesma `app:dev-<short_sha>` |
+| **Gatilho de Subida** | `git push origin dev` | `git push origin staging` | `git push origin main` |
+| **Estado Após o Deploy da Branch** | `desired_count = 1` (ativo com link público para testes) | `desired_count = 1` (ativo com link público para homologação) | `desired_count >= 1` (permanente em produção) |
 | **Grupo de Logs no CloudWatch** | `/ecs/aws-ecs-ephemeral-environments/dev` (14 dias) | `/ecs/aws-ecs-ephemeral-environments/staging` (30 dias) | `/ecs/aws-ecs-ephemeral-environments/prod` (90 dias) |
-| **Após Término dos Testes** | Service/Task encerrado automaticamente (`if: always()`) | Service/Task encerrado automaticamente (`if: always()`) | Mantido ativo com rolling update zero-downtime |
+| **Quando é Desligado (`desired_count = 0`)** | Automaticamente quando a branch `main` faz deploy em produção | Automaticamente quando a branch `main` faz deploy em produção | Nunca (ambiente permanente) |
 
 ---
 
